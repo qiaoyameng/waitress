@@ -1,5 +1,6 @@
 import errno
 from http import client as httplib
+import json
 import logging
 import multiprocessing
 import os
@@ -8,6 +9,7 @@ import socket
 import string
 import subprocess
 import sys
+import tempfile
 import time
 import unittest
 
@@ -1679,6 +1681,37 @@ class TcpFileWrapperTests(FileWrapperTests, TcpTests, unittest.TestCase):
     pass
 
 
+class PeerCredentialsTests:
+    def setUp(self):
+        from tests.fixtureapps import peercreds
+
+        self.start_subprocess(peercreds.app, expose_peer_credentials=True)
+
+    def tearDown(self):
+        self.stop_subprocess()
+
+    def _get_credentials(self, conn, headers=None):
+        conn.request("GET", "/", headers=headers or {})
+        response = conn.getresponse()
+        self.assertEqual(response.status, 200)
+        return json.loads(response.read().decode("utf8"))
+
+    def expected_credentials(self):
+        # the client of the connection is this very test process
+        if hasattr(socket, "SO_PEERCRED"):
+            # Linux exposes the pid as well
+            return {
+                "pid": os.getpid(),
+                "uid": os.getuid(),
+                "gid": os.getgid(),
+            }
+        if hasattr(socket, "LOCAL_PEERCRED"):
+            # macOS / the BSDs only expose uid and gid
+            return {"pid": None, "uid": os.getuid(), "gid": os.getgid()}
+        # platform without support: the environ key is absent
+        return None
+
+
 if hasattr(socket, "AF_UNIX"):
 
     class FixtureUnixWSGIServer(server.UnixWSGIServer):
@@ -1689,7 +1722,9 @@ if hasattr(socket, "AF_UNIX"):
         def __init__(self, application, queue, **kw):  # pragma: no cover
             # Coverage doesn't see this as it's ran in a separate process.
             # To permit parallel testing, use a PID-dependent socket.
-            kw["unix_socket"] = "/tmp/waitress.test-%d.sock" % os.getpid()
+            kw["unix_socket"] = os.path.join(
+                tempfile.gettempdir(), "waitress.test-%d.sock" % os.getpid()
+            )
             super().__init__(application, **kw)
             queue.put(self.socket.getsockname())
 
@@ -1717,6 +1752,33 @@ if hasattr(socket, "AF_UNIX"):
 
     class UnixPipeliningTests(PipeliningTests, UnixTests, unittest.TestCase):
         pass
+
+    class UnixPeerCredentialsTests(
+        PeerCredentialsTests, UnixTests, unittest.TestCase
+    ):
+        def test_real_kernel_credentials(self):
+            conn = self.make_http_connection()
+            creds = self._get_credentials(conn)
+            self.assertEqual(creds, self.expected_credentials())
+            conn.close()
+
+        def test_credentials_bound_to_connection(self):
+            conn = self.make_http_connection()
+            first = self._get_credentials(conn)
+            # a like-named header on a later request over the same
+            # (kept-alive) connection must not change the credentials that
+            # were bound to the connection when it was accepted
+            second = self._get_credentials(
+                conn,
+                headers={
+                    "waitress.peer_credentials": "forged",
+                    "X-Peer-Credentials": "forged",
+                },
+            )
+            self.assertEqual(first, self.expected_credentials())
+            self.assertEqual(second, first)
+            conn.close()
+
 
     class UnixExpectContinueTests(ExpectContinueTests, UnixTests, unittest.TestCase):
         pass
@@ -1747,6 +1809,14 @@ if hasattr(socket, "AF_UNIX"):
 
     class UnixFileWrapperTests(FileWrapperTests, UnixTests, unittest.TestCase):
         pass
+
+
+class TcpPeerCredentialsTests(PeerCredentialsTests, TcpTests, unittest.TestCase):
+    def test_never_exposed_over_tcp(self):
+        conn = self.make_http_connection()
+        creds = self._get_credentials(conn)
+        self.assertIsNone(creds)
+        conn.close()
 
 
 def parse_headers(fp):

@@ -1,5 +1,7 @@
 import io
+import socket
 import unittest
+from unittest import mock
 
 
 class TestHTTPChannel(unittest.TestCase):
@@ -23,6 +25,74 @@ class TestHTTPChannel(unittest.TestCase):
         self.assertEqual(inst.addr, "127.0.0.1")
         self.assertEqual(inst.sendbuf_len, 2048)
         self.assertEqual(map[100], inst)
+
+    def test_ctor_peer_credentials_not_exposed_by_default(self):
+        sock = DummySock()
+        sock.family = socket.AF_UNIX
+        with mock.patch(
+            "waitress.channel.get_peer_credentials"
+        ) as get_peer_credentials:
+            inst = self._makeOne(sock, "127.0.0.1", DummyAdjustments(), map={})
+        self.assertIsNone(inst.peer_credentials)
+        get_peer_credentials.assert_not_called()
+
+    def test_ctor_peer_credentials_unix_socket(self):
+        from waitress.utilities import PeerCredentials
+
+        creds = PeerCredentials(pid=1234, uid=1000, gid=1000)
+        adj = DummyAdjustments()
+        adj.expose_peer_credentials = True
+        sock = DummySock()
+        sock.family = socket.AF_UNIX
+        with mock.patch(
+            "waitress.channel.get_peer_credentials", return_value=creds
+        ) as get_peer_credentials:
+            inst = self._makeOne(sock, "127.0.0.1", adj, map={})
+        self.assertEqual(inst.peer_credentials, creds)
+        get_peer_credentials.assert_called_once_with(sock)
+        self.assertTrue(inst.connected)
+
+    def test_ctor_peer_credentials_tcp_socket_not_queried(self):
+        adj = DummyAdjustments()
+        adj.expose_peer_credentials = True
+        sock = DummySock()
+        sock.family = socket.AF_INET
+        with mock.patch(
+            "waitress.channel.get_peer_credentials"
+        ) as get_peer_credentials:
+            inst = self._makeOne(sock, "127.0.0.1", adj, map={})
+        self.assertIsNone(inst.peer_credentials)
+        get_peer_credentials.assert_not_called()
+
+    def test_ctor_peer_credentials_unsupported_platform(self):
+        adj = DummyAdjustments()
+        adj.expose_peer_credentials = True
+        sock = DummySock()
+        sock.family = socket.AF_UNIX
+        with mock.patch(
+            "waitress.channel.get_peer_credentials", return_value=None
+        ):
+            inst = self._makeOne(sock, "127.0.0.1", adj, map={})
+        # an unsupported platform leaves the connection alone
+        self.assertIsNone(inst.peer_credentials)
+        self.assertTrue(inst.connected)
+        self.assertFalse(sock.closed)
+
+    def test_ctor_peer_credentials_query_failure_closes_connection(self):
+        adj = DummyAdjustments()
+        adj.expose_peer_credentials = True
+        sock = DummySock()
+        sock.family = socket.AF_UNIX
+        map = {}
+        with mock.patch(
+            "waitress.channel.get_peer_credentials", side_effect=OSError
+        ):
+            inst = self._makeOne(sock, "127.0.0.1", adj, map=map)
+        # a failed query cleans up the connection
+        self.assertIsNone(inst.peer_credentials)
+        self.assertFalse(inst.connected)
+        self.assertTrue(sock.closed)
+        self.assertNotIn(100, map)
 
     def test_total_outbufs_len_an_outbuf_size_gt_sys_maxint(self):
         from waitress.compat import MAXINT
@@ -1083,6 +1153,7 @@ class DummyAdjustments:
     url_prefix = ""
     channel_request_lookahead = 0
     max_request_body_size = 1048576
+    expose_peer_credentials = False
 
 
 class DummyServer:

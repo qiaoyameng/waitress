@@ -565,6 +565,17 @@ class WSGITask(Task):
             if mykey not in environ:
                 environ[mykey] = value
 
+        # Insert the kernel-verified credentials of the peer, if the
+        # connection is a Unix domain socket and the server is configured to
+        # look them up. This happens after the request headers have been
+        # merged into the environ so that a client can never forge these
+        # values using a like-named HTTP header. The credentials were looked
+        # up when the connection was accepted and are shared by all requests
+        # on the connection.
+        peer_credentials = getattr(channel, "peer_credentials", None)
+        if peer_credentials is not None:
+            environ["waitress.peer_credentials"] = peer_credentials
+
         # Insert a callable into the environment that allows the application to
         # check if the client disconnected. Only works with
         # channel_request_lookahead larger than 0.

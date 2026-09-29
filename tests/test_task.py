@@ -730,6 +730,47 @@ class TestWSGITask(unittest.TestCase):
         environ = inst.get_environment()
         self.assertEqual(environ["QUERY_STRING"], "")
 
+    def test_get_environment_no_peer_credentials(self):
+        inst = self._makeOne()
+        request = DummyParser()
+        inst.request = request
+        environ = inst.get_environment()
+        self.assertNotIn("waitress.peer_credentials", environ)
+
+    def test_get_environment_with_peer_credentials(self):
+        from waitress.utilities import PeerCredentials
+
+        inst = self._makeOne()
+        inst.channel.peer_credentials = PeerCredentials(
+            pid=4321, uid=1000, gid=1001
+        )
+        request = DummyParser()
+        inst.request = request
+        environ = inst.get_environment()
+        self.assertEqual(
+            environ["waitress.peer_credentials"],
+            PeerCredentials(pid=4321, uid=1000, gid=1001),
+        )
+
+    def test_get_environment_peer_credentials_not_forgeable_by_header(self):
+        from waitress.utilities import PeerCredentials
+
+        inst = self._makeOne()
+        inst.channel.peer_credentials = PeerCredentials(
+            pid=4321, uid=1000, gid=1001
+        )
+        request = DummyParser()
+        # a like-named request header must not be able to override the
+        # kernel-verified credentials
+        request.headers = {"WAITRESS_PEER_CREDENTIALS": "forged"}
+        inst.request = request
+        environ = inst.get_environment()
+        self.assertEqual(
+            environ["waitress.peer_credentials"],
+            PeerCredentials(pid=4321, uid=1000, gid=1001),
+        )
+        self.assertEqual(environ["HTTP_WAITRESS_PEER_CREDENTIALS"], "forged")
+
     def test_get_environment_with_query(self):
         inst = self._makeOne()
         request = DummyParser()
@@ -960,6 +1001,7 @@ class DummyChannel:
     adj = DummyAdj()
     creation_time = 0
     addr = ("127.0.0.1", 39830)
+    peer_credentials = None
 
     def check_client_disconnected(self):
         # For now, until we have tests handling this feature

@@ -72,6 +72,27 @@ unix_socket_perms
 
     Default: ``'600'``
 
+expose_peer_credentials
+    Look up the kernel-verified credentials (process id, user id and group
+    id) of the peer for connections accepted on a Unix domain socket, and
+    expose them to the WSGI application in the environ as
+    ``waitress.peer_credentials`` (boolean).
+
+    The value is a named tuple ``(pid, uid, gid)``. ``pid`` is ``None`` on
+    platforms whose credential structure does not carry a process id
+    (macOS, the BSDs). The credentials are looked up once, when the
+    connection is accepted, and are shared by all requests on a kept-alive
+    connection. If the lookup fails the connection is closed.
+
+    The environ key is only ever inserted for connections on Unix domain
+    sockets on platforms that support the query (Linux, macOS, the BSDs);
+    it is never set for TCP connections, and clients can not forge it with
+    a like-named HTTP header.
+
+    Default: ``False``
+
+    .. versionadded:: 4.0
+
 sockets
     A list of sockets. The sockets can be either Internet or UNIX sockets and have
     to be bound. Internet and UNIX sockets cannot be mixed.

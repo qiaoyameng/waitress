@@ -131,6 +131,7 @@ class TestAdjustments(unittest.TestCase):
             asyncore_loop_timeout="5",
             asyncore_use_poll=True,
             unix_socket_perms="777",
+            expose_peer_credentials="true",
             url_prefix="///foo/",
             ipv4=True,
             ipv6=False,
@@ -160,6 +161,7 @@ class TestAdjustments(unittest.TestCase):
         self.assertTrue(inst.asyncore_use_poll)
         self.assertEqual(inst.ident, "abc")
         self.assertEqual(inst.unix_socket_perms, 0o777)
+        self.assertTrue(inst.expose_peer_credentials)
         self.assertEqual(inst.url_prefix, "/foo")
         self.assertTrue(inst.ipv4)
         self.assertFalse(inst.ipv6)

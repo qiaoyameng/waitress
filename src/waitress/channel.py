@@ -19,7 +19,7 @@ import traceback
 from waitress.buffers import OverflowableBuffer, ReadOnlyFileBasedBuffer
 from waitress.parser import HTTPRequestParser
 from waitress.task import ErrorTask, WSGITask
-from waitress.utilities import InternalServerError
+from waitress.utilities import InternalServerError, get_peer_credentials
 
 from . import wasyncore
 
@@ -48,6 +48,7 @@ class HTTPChannel(wasyncore.dispatcher):
     sent_continue = False  # used as a latch after sending 100 continue
     total_outbufs_len = 0  # total bytes ready to send
     current_outbuf_count = 0  # total bytes written to current outbuf
+    peer_credentials = None  # kernel-verified credentials of a Unix peer
 
     #
     # ASYNCHRONOUS METHODS (including __init__)
@@ -70,6 +71,25 @@ class HTTPChannel(wasyncore.dispatcher):
         self.connected = True
         self.addr = addr
         self.requests = []
+
+        if (
+            adj.expose_peer_credentials
+            and hasattr(socket, "AF_UNIX")
+            and getattr(sock, "family", None) == socket.AF_UNIX
+        ):
+            # Look up the peer credentials exactly once, when the connection
+            # is accepted, so that they are bound to the connection and can
+            # not be altered by any request received on it later.
+            try:
+                self.peer_credentials = get_peer_credentials(sock)
+            except OSError:
+                # The platform supports the query but it failed; we can not
+                # vouch for the peer, so clean up the connection instead of
+                # serving requests on it.
+                self.logger.exception(
+                    "Failed to get credentials of peer on Unix domain socket"
+                )
+                self.handle_close()
 
     def check_client_disconnected(self):
         """

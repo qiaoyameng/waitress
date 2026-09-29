@@ -13,6 +13,126 @@
 ##############################################################################
 
 import unittest
+import unittest.mock
+
+
+def _hide_socket_attr(name):
+    """Context manager that makes ``hasattr(socket, name)`` false."""
+    import contextlib
+    import socket
+
+    @contextlib.contextmanager
+    def hide():
+        sentinel = object()
+        saved = getattr(socket, name, sentinel)
+        if saved is not sentinel:
+            delattr(socket, name)
+        try:
+            yield
+        finally:
+            if saved is not sentinel:
+                setattr(socket, name, saved)
+
+    return hide()
+
+
+class Test_get_peer_credentials(unittest.TestCase):
+    def _callFUT(self, sock):
+        from waitress.utilities import get_peer_credentials
+
+        return get_peer_credentials(sock)
+
+    def _makeSock(self, getsockopt):
+        class Sock:
+            pass
+
+        sock = Sock()
+        sock.getsockopt = getsockopt
+        return sock
+
+    def test_linux_so_peercred(self):
+        import socket
+        import struct
+
+        from waitress.utilities import PeerCredentials
+
+        calls = []
+
+        def getsockopt(level, optname, buflen):
+            calls.append((level, optname, buflen))
+            return struct.pack("3i", 4321, 1000, 1001)
+
+        with unittest.mock.patch.object(socket, "SO_PEERCRED", 17, create=True):
+            result = self._callFUT(self._makeSock(getsockopt))
+
+        self.assertEqual(result, PeerCredentials(pid=4321, uid=1000, gid=1001))
+        self.assertEqual(calls, [(socket.SOL_SOCKET, 17, struct.calcsize("3i"))])
+
+    def test_bsd_local_peercred(self):
+        import socket
+        import struct
+
+        from waitress.utilities import PeerCredentials
+
+        # struct xucred: version, uid, ngroups, then the group list whose
+        # first entry is the effective gid; there is no pid. cr_groups is
+        # aligned to a 4 byte boundary, hence the 2 padding bytes.
+        creds = struct.pack("@IIh2xI", 1, 1002, 1, 1003)
+        creds += b"\x00" * (256 - len(creds))
+
+        calls = []
+
+        def getsockopt(level, optname, buflen):
+            calls.append((level, optname, buflen))
+            return creds
+
+        with _hide_socket_attr("SO_PEERCRED"), unittest.mock.patch.multiple(
+            socket, LOCAL_PEERCRED=1, SOL_LOCAL=0, create=True
+        ):
+            result = self._callFUT(self._makeSock(getsockopt))
+
+        self.assertEqual(result, PeerCredentials(pid=None, uid=1002, gid=1003))
+        self.assertEqual(calls, [(0, 1, 256)])
+
+    def test_unsupported_platform_returns_none(self):
+        def getsockopt(level, optname, buflen):  # pragma: no cover
+            raise AssertionError("must not be called")
+
+        with _hide_socket_attr("SO_PEERCRED"), _hide_socket_attr(
+            "LOCAL_PEERCRED"
+        ):
+            result = self._callFUT(self._makeSock(getsockopt))
+
+        self.assertIsNone(result)
+
+    def test_query_failure_raises_oserror(self):
+        import socket
+
+        def getsockopt(level, optname, buflen):
+            raise OSError("socket is not connected")
+
+        with unittest.mock.patch.object(socket, "SO_PEERCRED", 17, create=True):
+            self.assertRaises(OSError, self._callFUT, self._makeSock(getsockopt))
+
+    def test_short_creds_raises_oserror(self):
+        import socket
+
+        def getsockopt(level, optname, buflen):
+            return b"\x00\x00"
+
+        with unittest.mock.patch.object(socket, "SO_PEERCRED", 17, create=True):
+            self.assertRaises(OSError, self._callFUT, self._makeSock(getsockopt))
+
+    def test_short_xucred_raises_oserror(self):
+        import socket
+
+        def getsockopt(level, optname, buflen):
+            return b"\x00\x00"
+
+        with _hide_socket_attr("SO_PEERCRED"), unittest.mock.patch.multiple(
+            socket, LOCAL_PEERCRED=1, SOL_LOCAL=0, create=True
+        ):
+            self.assertRaises(OSError, self._callFUT, self._makeSock(getsockopt))
 
 
 class Test_parse_http_date(unittest.TestCase):

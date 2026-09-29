@@ -14,11 +14,14 @@
 """Utility functions"""
 
 import calendar
+from collections import namedtuple
 import errno
 import logging
 import os
 import re
+import socket
 import stat
+import struct
 import time
 
 from .rfc7230 import QUOTED_PAIR_RE, QUOTED_STRING_RE
@@ -250,6 +253,62 @@ def cleanup_unix_socket(path):
             except OSError:  # pragma: no cover
                 # avoid race condition error during tests
                 pass
+
+
+#: Kernel-verified credentials of the peer of a Unix domain socket
+#: connection. ``pid`` may be ``None`` on platforms whose credential
+#: structure does not carry a process id (e.g. macOS and the BSDs).
+PeerCredentials = namedtuple("PeerCredentials", ["pid", "uid", "gid"])
+
+
+def get_peer_credentials(sock):
+    """
+    Ask the kernel for the credentials of the peer connected to the Unix
+    domain socket ``sock``.
+
+    Returns a :class:`PeerCredentials` named tuple, or ``None`` when the
+    platform does not support querying peer credentials at all.
+
+    Raises :class:`OSError` when the platform supports the query but it
+    fails; callers should treat that as a broken connection rather than as
+    an unsupported platform.
+    """
+    if hasattr(socket, "SO_PEERCRED"):
+        # Linux: struct ucred { pid_t pid; uid_t uid; gid_t gid; }
+        fmt = "3i"
+        creds = sock.getsockopt(
+            socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize(fmt)
+        )
+        if len(creds) < struct.calcsize(fmt):
+            raise OSError("short struct ucred returned for SO_PEERCRED")
+        pid, uid, gid = struct.unpack(fmt, creds[: struct.calcsize(fmt)])
+
+        return PeerCredentials(pid=pid, uid=uid, gid=gid)
+
+    local_peercred = getattr(socket, "LOCAL_PEERCRED", None)
+    if local_peercred is not None:
+        # macOS / FreeBSD:
+        # struct xucred { u_int cr_version; uid_t cr_uid; short cr_ngroups;
+        #                 gid_t cr_groups[NGROUPS]; }
+        # There is no process id in this structure, only uid/gid. The first
+        # group in cr_groups is the effective gid of the peer.
+        sol_local = getattr(socket, "SOL_LOCAL", 0)
+        # cr_groups is aligned to a 4 byte boundary, so there are 2 bytes of
+        # padding after cr_ngroups that the format must skip explicitly
+        header_fmt = "@IIh2xI"
+        # The kernel insists on copying out the whole struct xucred, so the
+        # buffer has to be at least that big even though we only need the
+        # header and the first group.
+        creds = sock.getsockopt(sol_local, local_peercred, 256)
+        if len(creds) < struct.calcsize(header_fmt):
+            raise OSError("short struct xucred returned for LOCAL_PEERCRED")
+        _version, uid, _ngroups, gid = struct.unpack(
+            header_fmt, creds[: struct.calcsize(header_fmt)]
+        )
+
+        return PeerCredentials(pid=None, uid=uid, gid=gid)
+
+    return None
 
 
 class Error:
