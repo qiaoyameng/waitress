@@ -298,3 +298,21 @@ class InternalServerError(Error):
 class ServerNotImplemented(Error):
     code = 501
     reason = "Not Implemented"
+
+
+class AdmissionRejection:
+    """
+    A final response produced by the request admission callback.
+
+    It is sent to the client as-is, in place of any response the WSGI
+    application would have produced, and the connection is closed once
+    the response has been flushed.
+    """
+
+    def __init__(self, status, headers, body):
+        self.status = status
+        self.headers = headers
+        self.body = body
+
+    def to_response(self, ident=None):
+        return self.status, list(self.headers), self.body

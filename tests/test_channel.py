@@ -596,6 +596,206 @@ class TestHTTPChannel(unittest.TestCase):
         self.assertTrue(inst.sent_continue)
         self.assertFalse(preq.completed)
 
+    def _makeAdmissionRequest(self, inst, **kw):
+        preq = DummyParser()
+        preq.headers_finished = True
+        preq.completed = False
+        preq.empty = False
+        preq.command = "POST"
+        preq.request_uri = "/upload?x=1"
+        preq.headers = {"AUTHORIZATION": "Bearer token"}
+        for k, v in kw.items():
+            setattr(preq, k, v)
+        inst.request = preq
+        return preq
+
+    def test_received_admission_callback_allows_request(self):
+        inst, sock, map = self._makeOneWithMap()
+        inst.server = DummyServer()
+        calls = []
+
+        def callback(method, target, headers):
+            calls.append((method, target, headers))
+            return None
+
+        inst.adj.request_admission_callback = callback
+        preq = self._makeAdmissionRequest(inst, expect_continue=True)
+        inst.received(b"POST /upload?x=1 HTTP/1.1\r\n\r\n")
+        # the callback saw the method, target and a copy of the headers
+        self.assertEqual(
+            calls, [("POST", "/upload?x=1", {"AUTHORIZATION": "Bearer token"})]
+        )
+        self.assertTrue(preq.admission_checked)
+        # admitted: 100 Continue is sent as usual, request stays in progress
+        self.assertEqual(sock.sent, b"HTTP/1.1 100 Continue\r\n\r\n")
+        self.assertListEqual(inst.server.tasks, [])
+        self.assertIs(inst.request, preq)
+
+    def test_received_admission_callback_headers_are_a_copy(self):
+        inst, sock, map = self._makeOneWithMap()
+        inst.server = DummyServer()
+
+        def callback(method, target, headers):
+            headers["X_EVIL"] = "1"
+            return None
+
+        inst.adj.request_admission_callback = callback
+        preq = self._makeAdmissionRequest(inst)
+        inst.received(b"POST /upload?x=1 HTTP/1.1\r\n\r\n")
+        self.assertNotIn("X_EVIL", preq.headers)
+
+    def test_received_admission_callback_rejects_request(self):
+        from waitress.utilities import AdmissionRejection
+
+        inst, sock, map = self._makeOneWithMap()
+        inst.server = DummyServer()
+
+        def callback(method, target, headers):
+            return ("403 Forbidden", [("X-Reason", "quota")], b"denied")
+
+        inst.adj.request_admission_callback = callback
+        # the client already sent part of the body along with the headers;
+        # the parser only consumed the headers
+        preq = self._makeAdmissionRequest(inst, expect_continue=True, retval=10)
+        inst.received(b"POST /upload HTTP/1.1\r\n\r\n" + b"partial-body")
+        # no 100 Continue is sent for a rejected request
+        self.assertEqual(sock.sent, b"")
+        self.assertFalse(preq.expect_continue)
+        # the request is queued as an error task, never reaching the WSGI app
+        self.assertEqual(len(inst.server.tasks), 1)
+        self.assertIs(inst.requests[0], preq)
+        self.assertTrue(preq.completed)
+        self.assertIsInstance(preq.error, AdmissionRejection)
+        self.assertEqual(
+            preq.error.to_response(),
+            ("403 Forbidden", [("X-Reason", "quota")], b"denied"),
+        )
+        # the partially received body was discarded, not parsed as a request
+        self.assertIsNone(inst.request)
+
+    def test_received_admission_callback_rejects_and_discards_pipelined(self):
+        inst, sock, map = self._makeOneWithMap()
+        inst.server = DummyServer()
+        inst.adj.request_admission_callback = (
+            lambda m, t, h: ("403 Forbidden", [], b"denied")
+        )
+        # retval simulates the parser consuming only the first request's
+        # headers; a pipelined request sits behind them in the same buffer
+        preq = self._makeAdmissionRequest(inst, retval=20)
+        inst.received(b"GET /a HTTP/1.1\r\n\r\nGET /b HTTP/1.1\r\n\r\n")
+        self.assertEqual(len(inst.server.tasks), 1)
+        self.assertIs(inst.requests[0], preq)
+        # the pipelined request was discarded, no new parser was started
+        self.assertIsNone(inst.request)
+
+    def test_received_admission_callback_not_called_for_error_request(self):
+        inst, sock, map = self._makeOneWithMap()
+        inst.server = DummyServer()
+        calls = []
+
+        def callback(method, target, headers):
+            calls.append((method, target, headers))
+            return None
+
+        inst.adj.request_admission_callback = callback
+        # a request that already failed parsing keeps its original error
+        preq = self._makeAdmissionRequest(inst, completed=True, error=DummyError())
+        inst.received(b"GET / HTTP/1.1\r\n\r\n")
+        self.assertEqual(calls, [])
+        self.assertIsInstance(preq.error, DummyError)
+        self.assertEqual(len(inst.server.tasks), 1)
+
+    def test_received_admission_callback_not_called_for_empty_request(self):
+        inst, sock, map = self._makeOneWithMap()
+        inst.server = DummyServer()
+        calls = []
+
+        def callback(method, target, headers):
+            calls.append((method, target, headers))
+            return None
+
+        inst.adj.request_admission_callback = callback
+        preq = self._makeAdmissionRequest(inst, completed=True, empty=True)
+        inst.received(b"\r\n")
+        self.assertEqual(calls, [])
+        self.assertListEqual(inst.server.tasks, [])
+
+    def test_received_admission_callback_exception_returns_500(self):
+        from waitress.utilities import InternalServerError
+
+        inst, sock, map = self._makeOneWithMap()
+        inst.server = DummyServer()
+        inst.logger = DummyLogger()
+
+        def callback(method, target, headers):
+            raise RuntimeError("boom")
+
+        inst.adj.request_admission_callback = callback
+        preq = self._makeAdmissionRequest(inst, expect_continue=True)
+        inst.received(b"POST /upload HTTP/1.1\r\n\r\n")
+        self.assertIsInstance(preq.error, InternalServerError)
+        self.assertTrue(preq.completed)
+        self.assertFalse(preq.expect_continue)
+        self.assertEqual(sock.sent, b"")
+        self.assertEqual(len(inst.logger.exceptions), 1)
+        self.assertEqual(len(inst.server.tasks), 1)
+
+    def test_received_admission_callback_invalid_response_returns_500(self):
+        from waitress.utilities import InternalServerError
+
+        inst, sock, map = self._makeOneWithMap()
+        inst.server = DummyServer()
+        inst.logger = DummyLogger()
+        inst.adj.request_admission_callback = lambda m, t, h: "not a triple"
+        preq = self._makeAdmissionRequest(inst)
+        inst.received(b"POST /upload HTTP/1.1\r\n\r\n")
+        self.assertIsInstance(preq.error, InternalServerError)
+        self.assertTrue(preq.completed)
+        self.assertEqual(len(inst.logger.errors), 1)
+        self.assertEqual(len(inst.server.tasks), 1)
+
+    def test_received_admission_callback_invalid_headers_returns_500(self):
+        from waitress.utilities import InternalServerError
+
+        inst, sock, map = self._makeOneWithMap()
+        inst.server = DummyServer()
+        inst.logger = DummyLogger()
+        inst.adj.request_admission_callback = (
+            lambda m, t, h: ("403 Forbidden", [("X-Reason", 42)], b"denied")
+        )
+        preq = self._makeAdmissionRequest(inst)
+        inst.received(b"POST /upload HTTP/1.1\r\n\r\n")
+        self.assertIsInstance(preq.error, InternalServerError)
+        self.assertEqual(len(inst.logger.errors), 1)
+
+    def test_received_admission_callback_str_body_encoded(self):
+        from waitress.utilities import AdmissionRejection
+
+        inst, sock, map = self._makeOneWithMap()
+        inst.server = DummyServer()
+        inst.adj.request_admission_callback = (
+            lambda m, t, h: ("403 Forbidden", [], "denied")
+        )
+        preq = self._makeAdmissionRequest(inst)
+        inst.received(b"POST /upload HTTP/1.1\r\n\r\n")
+        self.assertIsInstance(preq.error, AdmissionRejection)
+        self.assertEqual(preq.error.body, b"denied")
+
+    def test_received_admission_callback_runs_only_once(self):
+        inst, sock, map = self._makeOneWithMap()
+        inst.server = DummyServer()
+        calls = []
+
+        def callback(method, target, headers):
+            calls.append((method, target, headers))
+            return None
+
+        inst.adj.request_admission_callback = callback
+        preq = self._makeAdmissionRequest(inst)
+        inst.received(b"POST /upload HTTP/1.1\r\n\r\n")
+        inst.received(b"more body data")
+        self.assertEqual(len(calls), 1)
+
     def test_service_with_one_request(self):
         inst, sock, map = self._makeOneWithMap()
         request = DummyRequest()
@@ -1083,6 +1283,7 @@ class DummyAdjustments:
     url_prefix = ""
     channel_request_lookahead = 0
     max_request_body_size = 1048576
+    request_admission_callback = None
 
 
 class DummyServer:
@@ -1108,6 +1309,7 @@ class DummyParser:
     completed = True
     empty = False
     headers_finished = False
+    admission_checked = False
     expect_continue = False
     retval = None
     error = None
@@ -1138,12 +1340,16 @@ class DummyLogger:
         self.exceptions = []
         self.infos = []
         self.warnings = []
+        self.errors = []
 
     def info(self, msg):
         self.infos.append(msg)
 
     def exception(self, msg):
         self.exceptions.append(msg)
+
+    def error(self, msg, *args):
+        self.errors.append(msg % args if args else msg)
 
 
 class DummyError:

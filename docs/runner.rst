@@ -276,6 +276,16 @@ Tuning options:
 
     Default: ``0``
 
+``--request-admission-callback=MODULE:OBJECT``
+    A callable that decides whether a request is admitted before its body is
+    received. It is invoked once per request with the request method, the
+    request target, and a copy of the request headers, and returns either
+    ``None`` to admit the request or a ``(status, headers, body)`` triple
+    that is sent to the client as the final response. See
+    :ref:`arguments` for the full contract.
+
+    Default: ``None``
+
 ``--[no-]log-socket-errors``
     Toggle whether premature client disconnect tracebacks ought to be logged.
     On by default.

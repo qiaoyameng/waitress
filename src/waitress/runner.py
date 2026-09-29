@@ -272,6 +272,13 @@ Tuning options:
         detecting if a client closed the connection while its request is being
         processed. Default is 0.
 
+    --request-admission-callback=MODULE:OBJECT
+        A callable that decides whether a request is admitted before its body
+        is received. It is invoked once per request with the request method,
+        the request target, and a copy of the request headers, and returns
+        either None to admit the request or a (status, headers, body) triple
+        that is sent to the client as the final response. Default is None.
+
 """
 
 

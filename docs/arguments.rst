@@ -328,3 +328,43 @@ channel_request_lookahead
     Default: ``0``
 
     .. versionadded:: 2.0.0
+
+request_admission_callback
+    An optional callable that decides whether a request is admitted before
+    its body is received, for example to check credentials or quotas found
+    in the request headers.
+
+    The callable is invoked exactly once per request, as soon as the request
+    line and headers have been fully received, but before a ``100 Continue``
+    response is sent and before any of the request body is read. It is
+    called with three arguments: the request method (a string, e.g.
+    ``"POST"``), the request target (a string, e.g. ``"/upload?x=1"``), and
+    a copy of the request headers (a dict whose keys are in WSGI-style
+    upper-case/underscore form, e.g. ``"AUTHORIZATION"``). The request body
+    is not available to the callable, and Waitress does not read any of it
+    before invoking the callable.
+
+    The callable must return either:
+
+    - ``None`` to admit the request; processing continues as usual, or
+    - a ``(status, headers, body)`` triple (e.g.
+      ``("403 Forbidden", [("Content-Type", "text/plain")], b"denied")``)
+      which is sent to the client as the final response.
+
+    A rejected request is never passed to the WSGI application and no
+    ``100 Continue`` response is sent for it. Any request body bytes and
+    any pipelined requests already received on the connection are
+    discarded, and the connection is closed once the rejection response
+    has been flushed (the response carries ``Connection: close``).
+
+    If the callable raises an exception, or returns something that is not
+    ``None`` or a valid ``(status, headers, body)`` triple, the request is
+    rejected with a ``500 Internal Server Error`` response and the
+    connection is closed as described above.
+
+    The callable runs on the server's main thread, so it should be fast
+    and must not block.
+
+    Default: ``None``
+
+    .. versionadded:: 4.0.0

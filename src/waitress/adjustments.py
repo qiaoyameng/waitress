@@ -88,6 +88,24 @@ def as_socket_list(sockets):
     return [sock for sock in sockets if isinstance(sock, socket.socket)]
 
 
+def as_callable(value):
+    """Resolve a callable, either passed directly or named by a dotted
+    path such as ``my.module:my_function``."""
+    if value is None:
+        return None
+    if callable(value):
+        return value
+    if isinstance(value, str):
+        try:
+            resolved = pkgutil.resolve_name(value)
+        except (ValueError, ImportError, AttributeError) as exc:
+            raise ValueError(f"Cannot import callable '{value}': {exc}")
+        if not callable(resolved):
+            raise ValueError(f"'{value}' does not resolve to a callable")
+        return resolved
+    raise ValueError(f"'{value}' is not a callable")
+
+
 class _str_marker(str):
     pass
 
@@ -150,6 +168,7 @@ class Adjustments:
         ("sockets", as_socket_list),
         ("channel_request_lookahead", int),
         ("server_name", str),
+        ("request_admission_callback", as_callable),
     )
 
     _param_map = dict(_params)
@@ -305,6 +324,22 @@ class Adjustments:
     # only ever used if the remote client sent a request without a Host header
     # (or when using the Proxy settings, without forwarding a Host header)
     server_name = "waitress.invalid"
+
+    # Optional callable that decides whether a request is admitted before its
+    # body is received. It is invoked exactly once per request, as soon as the
+    # request line and headers have been fully received, but before a
+    # 100 Continue response is sent and before any of the request body is
+    # read. It is called with the request method, the request target, and a
+    # copy of the request headers (a dict with keys in WSGI-style
+    # upper-case/underscore form, e.g. "AUTHORIZATION"), and must return
+    # either None to admit the request, or a (status, headers, body) triple
+    # which is sent to the client as the final response. A rejected request
+    # is never passed to the WSGI application, no 100 Continue response is
+    # sent for it, any request body bytes and pipelined requests already
+    # received are discarded, and the connection is closed once the response
+    # has been flushed. The callable runs on the server's main thread and
+    # should therefore be fast and non-blocking.
+    request_admission_callback = None
 
     def __init__(self, **kw):
         if "listen" in kw and ("host" in kw or "port" in kw):

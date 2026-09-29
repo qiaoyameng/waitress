@@ -60,6 +60,7 @@ class HTTPRequestParser:
     empty = False  # Set if no request was made.
     expect_continue = False  # client sent "Expect: 100-continue" header
     headers_finished = False  # True when headers have been read
+    admission_checked = False  # True once the admission callback ran
     header_plus = b""
     chunked = False
     content_length = 0

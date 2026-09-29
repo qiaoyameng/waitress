@@ -99,6 +99,17 @@ Backward Incompatibilities
 Features
 ~~~~~~~~
 
+- Added a ``request_admission_callback`` adjustment. When set, the callable
+  is invoked once per request as soon as the request line and headers have
+  been fully received, but before a ``100 Continue`` response is sent and
+  before any of the request body is read. It is handed the request method,
+  the request target, and a copy of the request headers, and returns either
+  ``None`` to admit the request or a ``(status, headers, body)`` triple that
+  is sent to the client as the final response. A rejected request is never
+  passed to the WSGI application, receives no ``100 Continue``, and the
+  connection is closed once the rejection response has been flushed; any
+  request body bytes and pipelined requests already received are discarded.
+
 - Added support for Python 3.13.
   See https://github.com/Pylons/waitress/pull/445.
 

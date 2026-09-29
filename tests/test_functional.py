@@ -698,6 +698,127 @@ class ExpectContinueTests:
             self.assertEqual(response_body, data)
 
 
+class AdmissionCallbackTests:
+    # The fixture callback rejects any request carrying an
+    # "X-Quota: exceeded" header with a 403, and admits everything else.
+    def setUp(self):
+        from tests.fixtureapps import admission
+
+        self.start_subprocess(
+            admission.app,
+            request_admission_callback=admission.admission_callback,
+        )
+
+    def tearDown(self):
+        self.stop_subprocess()
+
+    def test_rejected_request_gets_no_100_continue_and_never_reaches_app(self):
+        # A client that waits for 100 Continue before sending the body
+        # receives the final rejection response instead; the request is
+        # never passed to the WSGI application and the connection is
+        # closed once the response has been sent.
+        body = b"this body must never be read by the server"
+        to_send = (
+            b"POST /upload HTTP/1.1\r\n"
+            b"Host: localhost\r\n"
+            b"Content-Length: %d\r\n"
+            b"Expect: 100-continue\r\n"
+            b"X-Quota: exceeded\r\n"
+            b"\r\n" % len(body)
+        )
+        self.connect()
+        self.sock.send(to_send)
+        self.sock.settimeout(5)
+        with self.sock.makefile("rb", 0) as fp:
+            line = fp.readline()  # status line, NOT a 100 Continue
+            version, status, reason = (x.strip() for x in line.split(None, 2))
+            self.assertEqual(int(status), 403)
+            self.assertEqual(version, b"HTTP/1.1")
+            headers = parse_headers(fp)
+            self.assertEqual(headers.get("connection"), "close")
+            length = int(headers.get("content-length"))
+            # the body comes from the admission callback, the WSGI app
+            # would have answered "admission fixture app reached"
+            self.assertEqual(fp.read(length), b"quota exceeded")
+            # the server closed the connection after the response
+            self.assertEqual(fp.read(), b"")
+
+    def test_rejected_request_discards_body_and_pipelined_requests(self):
+        # The client sends part of the body up front (no Expect header)
+        # plus a pipelined request; the rejection response is the only
+        # response sent, everything else is discarded and the connection
+        # is closed.
+        to_send = (
+            b"POST /upload HTTP/1.1\r\n"
+            b"Host: localhost\r\n"
+            b"Content-Length: 100\r\n"
+            b"X-Quota: exceeded\r\n"
+            b"\r\n"
+            b"partial body bytes"
+            b"GET /pipelined HTTP/1.1\r\n"
+            b"Host: localhost\r\n"
+            b"\r\n"
+        )
+        self.connect()
+        self.sock.send(to_send)
+        self.sock.settimeout(5)
+        with self.sock.makefile("rb", 0) as fp:
+            line = fp.readline()
+            version, status, reason = (x.strip() for x in line.split(None, 2))
+            self.assertEqual(int(status), 403)
+            headers = parse_headers(fp)
+            self.assertEqual(headers.get("connection"), "close")
+            length = int(headers.get("content-length"))
+            self.assertEqual(fp.read(length), b"quota exceeded")
+            # the pipelined request was discarded, the connection is closed
+            self.assertEqual(fp.read(), b"")
+
+    def test_admitted_request_gets_100_continue_and_reaches_app(self):
+        body = b"admitted body"
+        to_send = (
+            b"POST /upload HTTP/1.1\r\n"
+            b"Host: localhost\r\n"
+            b"Content-Length: %d\r\n"
+            b"Expect: 100-continue\r\n"
+            b"\r\n" % len(body)
+        )
+        self.connect()
+        self.sock.send(to_send)
+        self.sock.settimeout(5)
+        with self.sock.makefile("rb", 0) as fp:
+            line = fp.readline()  # continue status line
+            version, status, reason = (x.strip() for x in line.split(None, 2))
+            self.assertEqual(int(status), 100)
+            self.assertEqual(reason, b"Continue")
+            fp.readline()  # blank line
+            # the callback admitted the request; send the body now
+            self.sock.sendall(body)
+            line = fp.readline()  # final status line
+            version, status, reason = (x.strip() for x in line.split(None, 2))
+            self.assertEqual(int(status), 200)
+            headers = parse_headers(fp)
+            length = int(headers.get("content-length"))
+            self.assertEqual(fp.read(length), b"admission fixture app reached")
+
+    def test_admitted_request_without_expect_reaches_app(self):
+        to_send = (
+            b"GET /resource HTTP/1.1\r\n"
+            b"Host: localhost\r\n"
+            b"Connection: close\r\n"
+            b"\r\n"
+        )
+        self.connect()
+        self.sock.send(to_send)
+        self.sock.settimeout(5)
+        with self.sock.makefile("rb", 0) as fp:
+            line = fp.readline()
+            version, status, reason = (x.strip() for x in line.split(None, 2))
+            self.assertEqual(int(status), 200)
+            headers = parse_headers(fp)
+            length = int(headers.get("content-length"))
+            self.assertEqual(fp.read(length), b"admission fixture app reached")
+
+
 class BadContentLengthTests:
     def setUp(self):
         from tests.fixtureapps import badcl
@@ -1644,6 +1765,10 @@ class TcpPipeliningTests(PipeliningTests, TcpTests, unittest.TestCase):
 
 
 class TcpExpectContinueTests(ExpectContinueTests, TcpTests, unittest.TestCase):
+    pass
+
+
+class TcpAdmissionCallbackTests(AdmissionCallbackTests, TcpTests, unittest.TestCase):
     pass
 
 

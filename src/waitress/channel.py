@@ -19,7 +19,7 @@ import traceback
 from waitress.buffers import OverflowableBuffer, ReadOnlyFileBasedBuffer
 from waitress.parser import HTTPRequestParser
 from waitress.task import ErrorTask, WSGITask
-from waitress.utilities import InternalServerError
+from waitress.utilities import AdmissionRejection, InternalServerError
 
 from . import wasyncore
 
@@ -212,6 +212,24 @@ class HTTPChannel(wasyncore.dispatcher):
                     self.request = self.parser_class(self.adj)
                 n = self.request.received(data)
 
+                # If a request admission callback is configured, run it as
+                # soon as the headers of a request have been fully received,
+                # before a 100 Continue response is sent and before any of
+                # the request body is read. A rejection discards any data
+                # already received beyond the request headers (a partial
+                # request body, or pipelined requests).
+                discard = False
+
+                if (
+                    self.adj.request_admission_callback is not None
+                    and self.request.headers_finished
+                    and not self.request.admission_checked
+                ):
+                    self.request.admission_checked = True
+
+                    if self.request.error is None and not self.request.empty:
+                        discard = self.check_admission(self.request)
+
                 # if there are requests queued, we can not send the continue
                 # header yet since the responses need to be kept in order
 
@@ -238,9 +256,90 @@ class HTTPChannel(wasyncore.dispatcher):
                             self.server.add_task(self)
                     self.request = None
 
-                if n >= len(data):
+                if discard or n >= len(data):
                     break
                 data = data[n:]
+
+        return True
+
+    def check_admission(self, request):
+        """
+        Run the configured request admission callback for a request whose
+        headers have been fully received.
+
+        The callback is handed the request method, the request target, and
+        a copy of the request headers; it must not read the request body,
+        which has not been received yet. If it returns None the request is
+        admitted and processing continues as usual. Otherwise it must
+        return a (status, headers, body) triple which is sent to the
+        client as the final response: the request is never passed to the
+        WSGI application, no 100 Continue response is sent, and the
+        connection is closed once the response has been flushed.
+
+        Returns True if the request was rejected.
+        """
+        callback = self.adj.request_admission_callback
+
+        try:
+            result = callback(
+                request.command,
+                request.request_uri,
+                dict(request.headers),
+            )
+        except Exception:
+            self.logger.exception("Exception in request admission callback")
+            request.error = InternalServerError(
+                "The request admission callback raised an exception"
+            )
+            request.completed = True
+            request.expect_continue = False
+
+            return True
+
+        if result is None:
+            return False
+
+        try:
+            status, headers, body = result
+
+            if (
+                not isinstance(status, str)
+                or len(status) < 3
+                or not status[:3].isdigit()
+            ):
+                raise ValueError("status is not of the form 'NNN Reason'")
+
+            validated_headers = []
+
+            for name, value in headers:
+                if not (isinstance(name, str) and isinstance(value, str)):
+                    raise ValueError("header names and values must be strings")
+                validated_headers.append((name, value))
+
+            headers = validated_headers
+
+            if isinstance(body, str):
+                body = body.encode("latin-1")
+            elif isinstance(body, (bytes, bytearray)):
+                body = bytes(body)
+            else:
+                raise ValueError("body is not bytes or str")
+        except (TypeError, ValueError):
+            self.logger.error(
+                "Request admission callback returned an invalid response: %r",
+                result,
+            )
+            request.error = InternalServerError(
+                "The request admission callback returned an invalid response"
+            )
+            request.completed = True
+            request.expect_continue = False
+
+            return True
+
+        request.error = AdmissionRejection(status, headers, body)
+        request.completed = True
+        request.expect_continue = False
 
         return True
 

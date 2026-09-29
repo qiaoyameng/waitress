@@ -384,6 +384,35 @@ class TestAdjustments(unittest.TestCase):
         inst = self._makeOne(ident="specific_header")
         self.assertEqual(inst.ident, "specific_header")
 
+    def test_request_admission_callback_defaults_to_none(self):
+        inst = self._makeOne()
+        self.assertIsNone(inst.request_admission_callback)
+
+    def test_request_admission_callback_callable(self):
+        def callback(method, target, headers):
+            return None
+
+        inst = self._makeOne(request_admission_callback=callback)
+        self.assertIs(inst.request_admission_callback, callback)
+
+    def test_request_admission_callback_dotted_name(self):
+        from tests.fixtureapps import admission
+
+        inst = self._makeOne(
+            request_admission_callback="tests.fixtureapps.admission:admission_callback"
+        )
+        self.assertIs(inst.request_admission_callback, admission.admission_callback)
+
+    def test_request_admission_callback_bad_dotted_name(self):
+        self.assertRaises(
+            ValueError,
+            self._makeOne,
+            request_admission_callback="no.such.module:callback",
+        )
+
+    def test_request_admission_callback_not_a_callable(self):
+        self.assertRaises(ValueError, self._makeOne, request_admission_callback=42)
+
 
 class TestCLI(unittest.TestCase):
     def parse(self, argv):
@@ -479,6 +508,20 @@ class TestCLI(unittest.TestCase):
         import getopt
 
         self.assertRaises(getopt.GetoptError, self.parse, ["--no-host"])
+
+    def test_request_admission_callback_param(self):
+        opts = self.parse(
+            [
+                "--request-admission-callback=tests.fixtureapps.admission:admission_callback",
+                "tests.fixtureapps.runner:app",
+            ]
+        )
+        self.assertDictContainsSubset(
+            {
+                "request_admission_callback": "tests.fixtureapps.admission:admission_callback",
+            },
+            opts,
+        )
 
 
 if hasattr(socket, "AF_UNIX"):
