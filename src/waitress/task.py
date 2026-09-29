@@ -570,6 +570,19 @@ class WSGITask(Task):
         # channel_request_lookahead larger than 0.
         environ["waitress.client_disconnected"] = self.channel.check_client_disconnected
 
+        # Insert the kernel-verified credentials of the process at the other
+        # end of a Unix domain socket connection, if they are available. They
+        # are queried once when the connection is accepted and bound to the
+        # connection, so a client cannot forge or alter them, neither with
+        # HTTP headers (which are only ever copied to HTTP_* keys) nor with a
+        # subsequent request on the same connection.
+        peer_credentials = channel.peer_credentials
+        if peer_credentials is not None:
+            if peer_credentials.pid is not None:
+                environ["waitress.unix_peer_pid"] = peer_credentials.pid
+            environ["waitress.unix_peer_uid"] = peer_credentials.uid
+            environ["waitress.unix_peer_gid"] = peer_credentials.gid
+
         # cache the environ for this request
         self.environ = environ
         return environ

@@ -18,6 +18,7 @@ import traceback
 
 from waitress.buffers import OverflowableBuffer, ReadOnlyFileBasedBuffer
 from waitress.parser import HTTPRequestParser
+from waitress.peercred import PeerCredentialsUnsupported, get_peer_credentials
 from waitress.task import ErrorTask, WSGITask
 from waitress.utilities import InternalServerError
 
@@ -48,6 +49,9 @@ class HTTPChannel(wasyncore.dispatcher):
     sent_continue = False  # used as a latch after sending 100 continue
     total_outbufs_len = 0  # total bytes ready to send
     current_outbuf_count = 0  # total bytes written to current outbuf
+    # kernel-verified credentials of the peer, only queried for Unix domain
+    # socket connections when expose_unix_peer_credentials is enabled
+    peer_credentials = None
 
     #
     # ASYNCHRONOUS METHODS (including __init__)
@@ -70,6 +74,33 @@ class HTTPChannel(wasyncore.dispatcher):
         self.connected = True
         self.addr = addr
         self.requests = []
+
+        if (
+            adj.expose_unix_peer_credentials
+            and hasattr(socket, "AF_UNIX")
+            and getattr(sock, "family", None) == socket.AF_UNIX
+        ):
+            # The credentials are bound to the connection, query them once
+            # here so that they are identical for every request served on
+            # this connection and cannot be influenced by anything the peer
+            # sends (including HTTP headers).
+            try:
+                self.peer_credentials = get_peer_credentials(sock)
+            except PeerCredentialsUnsupported:
+                self.logger.info(
+                    "expose_unix_peer_credentials is enabled, but querying "
+                    "peer credentials is not supported on this platform"
+                )
+            except Exception:
+                # The platform supports the query but it failed. Without
+                # kernel-verified credentials we cannot safely service
+                # requests on this connection, so clean it up.
+                self.logger.warning(
+                    "could not query Unix socket peer credentials, "
+                    "closing connection",
+                    exc_info=True,
+                )
+                self.close()
 
     def check_client_disconnected(self):
         """

@@ -738,6 +738,61 @@ class TestWSGITask(unittest.TestCase):
         environ = inst.get_environment()
         self.assertEqual(environ["QUERY_STRING"], "abc")
 
+    def test_get_environment_no_unix_peer_credentials_by_default(self):
+        inst = self._makeOne()
+        request = DummyParser()
+        inst.request = request
+        environ = inst.get_environment()
+        self.assertNotIn("waitress.unix_peer_pid", environ)
+        self.assertNotIn("waitress.unix_peer_uid", environ)
+        self.assertNotIn("waitress.unix_peer_gid", environ)
+
+    def test_get_environment_with_unix_peer_credentials(self):
+        from waitress.peercred import PeerCredentials
+
+        inst = self._makeOne()
+        inst.channel.peer_credentials = PeerCredentials(pid=123, uid=1000, gid=1001)
+        request = DummyParser()
+        inst.request = request
+        environ = inst.get_environment()
+        self.assertEqual(environ["waitress.unix_peer_pid"], 123)
+        self.assertEqual(environ["waitress.unix_peer_uid"], 1000)
+        self.assertEqual(environ["waitress.unix_peer_gid"], 1001)
+
+    def test_get_environment_with_unix_peer_credentials_no_pid(self):
+        # platforms whose kernel does not report a pid (FreeBSD, macOS)
+        from waitress.peercred import PeerCredentials
+
+        inst = self._makeOne()
+        inst.channel.peer_credentials = PeerCredentials(pid=None, uid=1000, gid=1001)
+        request = DummyParser()
+        inst.request = request
+        environ = inst.get_environment()
+        self.assertNotIn("waitress.unix_peer_pid", environ)
+        self.assertEqual(environ["waitress.unix_peer_uid"], 1000)
+        self.assertEqual(environ["waitress.unix_peer_gid"], 1001)
+
+    def test_get_environment_unix_peer_credentials_not_spoofable(self):
+        # HTTP headers must never be able to forge the kernel-verified
+        # credentials, they are only ever copied to HTTP_* environ keys
+        from waitress.peercred import PeerCredentials
+
+        inst = self._makeOne()
+        inst.channel.peer_credentials = PeerCredentials(pid=123, uid=1000, gid=1001)
+        request = DummyParser()
+        # header names as stored by the parser: uppercased, dashes folded
+        request.headers = {
+            "X_WAITRESS_UNIX_PEER_PID": "1",
+            "X_WAITRESS_UNIX_PEER_UID": "0",
+            "X_WAITRESS_UNIX_PEER_GID": "0",
+        }
+        inst.request = request
+        environ = inst.get_environment()
+        self.assertEqual(environ["waitress.unix_peer_pid"], 123)
+        self.assertEqual(environ["waitress.unix_peer_uid"], 1000)
+        self.assertEqual(environ["waitress.unix_peer_gid"], 1001)
+        self.assertEqual(environ["HTTP_X_WAITRESS_UNIX_PEER_UID"], "0")
+
     def test_get_environ_with_url_prefix_miss(self):
         inst = self._makeOne()
         inst.channel.server.adj.url_prefix = "/foo"
@@ -960,6 +1015,7 @@ class DummyChannel:
     adj = DummyAdj()
     creation_time = 0
     addr = ("127.0.0.1", 39830)
+    peer_credentials = None
 
     def check_client_disconnected(self):
         # For now, until we have tests handling this feature

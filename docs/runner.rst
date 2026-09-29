@@ -139,6 +139,14 @@ Common options:
     Octal permissions to use for the Unix domain socket, default is
     '600'.
 
+``--[no-]expose-unix-peer-credentials``
+    When serving over a Unix domain socket, query the kernel for the PID,
+    UID and GID of the process at the other end of each connection and
+    expose them to the WSGI application in the environ as
+    ``waitress.unix_peer_pid``, ``waitress.unix_peer_uid`` and
+    ``waitress.unix_peer_gid``. The values are provided by the kernel and
+    cannot be forged by the client. Default is disabled.
+
 ``--url-scheme=STR``
     Default ``wsgi.url_scheme`` value, default is 'http'.
 

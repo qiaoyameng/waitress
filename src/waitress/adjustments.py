@@ -147,6 +147,7 @@ class Adjustments:
         ("asyncore_use_poll", asbool),
         ("unix_socket", str),
         ("unix_socket_perms", asoctal),
+        ("expose_unix_peer_credentials", asbool),
         ("sockets", as_socket_list),
         ("channel_request_lookahead", int),
         ("server_name", str),
@@ -270,6 +271,15 @@ class Adjustments:
 
     # Path to a Unix domain socket to use.
     unix_socket_perms = 0o600
+
+    # When serving over a Unix domain socket, query the kernel for the
+    # credentials (pid, uid, gid) of the process at the other end of each
+    # connection and expose them to the WSGI application in the environ as
+    # ``waitress.unix_peer_pid``, ``waitress.unix_peer_uid`` and
+    # ``waitress.unix_peer_gid``. The values are provided by the kernel and
+    # cannot be forged by the client. Has no effect on non-Unix-socket
+    # connections or on platforms that do not support the query.
+    expose_unix_peer_credentials = False
 
     # The socket options to set on receiving a connection.  It is a list of
     # (level, optname, value) tuples.  TCP_NODELAY disables the Nagle

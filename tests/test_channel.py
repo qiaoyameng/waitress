@@ -1,4 +1,5 @@
 import io
+import socket
 import unittest
 
 
@@ -953,6 +954,126 @@ class TestHTTPChannelLookahead(TestHTTPChannel):
         self.assertEqual(len(data), 0)
 
 
+class TestHTTPChannelPeerCredentials(unittest.TestCase):
+    def _makeOne(self, sock, adj, map=None):
+        from waitress.channel import HTTPChannel
+
+        server = DummyServer()
+        return HTTPChannel(server, sock, ("localhost", None), adj=adj, map=map)
+
+    def _makeAdjustments(self, **kw):
+        adj = DummyAdjustments()
+        adj.expose_unix_peer_credentials = kw.get(
+            "expose_unix_peer_credentials", True
+        )
+        return adj
+
+    def test_unix_socket_queries_credentials_once_at_connect(self):
+        from unittest import mock
+
+        from waitress.peercred import PeerCredentials
+
+        creds = PeerCredentials(pid=123, uid=1000, gid=1001)
+        sock = DummyUnixSock()
+        with mock.patch(
+            "waitress.channel.get_peer_credentials", return_value=creds
+        ) as query:
+            inst = self._makeOne(sock, self._makeAdjustments(), map={})
+        query.assert_called_once_with(sock)
+        self.assertEqual(inst.peer_credentials, creds)
+        self.assertTrue(inst.connected)
+
+    def test_unix_socket_query_failure_closes_connection(self):
+        from unittest import mock
+
+        sock = DummyUnixSock()
+        map = {}
+        with mock.patch(
+            "waitress.channel.get_peer_credentials",
+            side_effect=OSError("kernel said no"),
+        ):
+            inst = self._makeOne(sock, self._makeAdjustments(), map=map)
+        # the connection is cleaned up: not connected, socket closed, and
+        # removed from the async map
+        self.assertFalse(inst.connected)
+        self.assertTrue(sock.closed)
+        self.assertEqual(inst.peer_credentials, None)
+        self.assertNotIn(sock.fileno(), map)
+
+    def test_unix_socket_unsupported_platform_keeps_connection(self):
+        from unittest import mock
+
+        from waitress.peercred import PeerCredentialsUnsupported
+
+        sock = DummyUnixSock()
+        with mock.patch(
+            "waitress.channel.get_peer_credentials",
+            side_effect=PeerCredentialsUnsupported("nope"),
+        ):
+            inst = self._makeOne(sock, self._makeAdjustments(), map={})
+        # an unsupported platform is not a failure: the connection stays
+        # open, there are simply no credentials to expose
+        self.assertTrue(inst.connected)
+        self.assertFalse(sock.closed)
+        self.assertEqual(inst.peer_credentials, None)
+
+    def test_tcp_connection_never_queries_credentials(self):
+        from unittest import mock
+
+        sock = DummySock()
+        with mock.patch("waitress.channel.get_peer_credentials") as query:
+            inst = self._makeOne(sock, self._makeAdjustments(), map={})
+        query.assert_not_called()
+        self.assertEqual(inst.peer_credentials, None)
+        self.assertTrue(inst.connected)
+
+    def test_disabled_by_default(self):
+        from unittest import mock
+
+        sock = DummyUnixSock()
+        adj = self._makeAdjustments(expose_unix_peer_credentials=False)
+        with mock.patch("waitress.channel.get_peer_credentials") as query:
+            inst = self._makeOne(sock, adj, map={})
+        query.assert_not_called()
+        self.assertEqual(inst.peer_credentials, None)
+        self.assertTrue(inst.connected)
+
+    @unittest.skipUnless(hasattr(socket, "AF_UNIX"), "need Unix domain sockets")
+    @unittest.skipUnless(
+        __import__("sys").platform.startswith("linux"),
+        "real credentials are Linux-specific",
+    )
+    def test_real_credentials_on_linux_local_socket(self):
+        import os
+        import struct
+
+        server_end, client_end = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            # some sandboxed environments (seccomp) deny SO_PEERCRED
+            server_end.getsockopt(
+                socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i")
+            )
+        except PermissionError as exc:  # pragma: no cover
+            server_end.close()
+            client_end.close()
+            raise unittest.SkipTest(
+                f"SO_PEERCRED is not permitted in this environment: {exc}"
+            )
+        map = {}
+        try:
+            inst = self._makeOne(server_end, self._makeAdjustments(), map=map)
+            self.assertTrue(inst.connected)
+            creds = inst.peer_credentials
+            self.assertIsNotNone(creds)
+            self.assertEqual(creds.pid, os.getpid())
+            self.assertEqual(creds.uid, os.getuid())
+            self.assertEqual(creds.gid, os.getgid())
+        finally:
+            client_end.close()
+            for dispatcher in list(map.values()):
+                dispatcher.close()
+
+
 class DummySock:
     blocking = False
     closed = False
@@ -1014,6 +1135,10 @@ class DummySock:
                 return outer
 
         return LocalDummySock()
+
+
+class DummyUnixSock(DummySock):
+    family = socket.AF_UNIX
 
 
 class DummyLock:
@@ -1083,6 +1208,8 @@ class DummyAdjustments:
     url_prefix = ""
     channel_request_lookahead = 0
     max_request_body_size = 1048576
+    expose_unix_peer_credentials = False
+    expose_unix_peer_credentials = False
 
 
 class DummyServer:

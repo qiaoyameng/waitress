@@ -39,6 +39,21 @@ Backward Incompatibilities
   3333 does not allow. A request-target beginning with ``//`` is still treated
   as a path, as before.
 
+Features
+~~~~~~~~
+
+- Add a new ``expose_unix_peer_credentials`` adjustment (and matching
+  ``--[no-]expose-unix-peer-credentials`` command line option). When enabled
+  and a connection arrives over a Unix domain socket, waitress asks the
+  kernel for the PID, UID and GID of the process at the other end of the
+  connection and exposes them in the WSGI environ as
+  ``waitress.unix_peer_pid``, ``waitress.unix_peer_uid`` and
+  ``waitress.unix_peer_gid``. The values are kernel-verified, are bound to
+  the connection for its whole lifetime, and cannot be forged by the client
+  with HTTP headers. Connections for which the query fails are closed;
+  platforms that do not support the query simply do not get the environ
+  keys.
+
 Bugfix
 ~~~~~~
 

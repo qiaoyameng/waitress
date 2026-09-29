@@ -1748,6 +1748,81 @@ if hasattr(socket, "AF_UNIX"):
     class UnixFileWrapperTests(FileWrapperTests, UnixTests, unittest.TestCase):
         pass
 
+    class UnixPeerCredentialsTests(UnixTests, unittest.TestCase):
+        def setUp(self):
+            from tests.fixtureapps import peercreds
+
+            self.start_subprocess(peercreds.app, expose_unix_peer_credentials=True)
+
+        def tearDown(self):
+            self.stop_subprocess()
+
+        def _get_peer_credentials(self, extra_headers=b""):
+            request = (
+                b"GET / HTTP/1.0\r\nContent-Length: 0\r\n" + extra_headers + b"\r\n"
+            )
+            self.connect()
+            self.sock.send(request)
+            with self.sock.makefile("rb", 0) as fp:
+                line, headers, body = read_http(fp)
+                self.assertline(line, "200", "OK", "HTTP/1.0")
+            import json
+
+            return json.loads(body.decode("utf8"))
+
+        def test_real_credentials_reported_by_kernel(self):
+            from waitress.peercred import (
+                PeerCredentialsUnsupported,
+                get_peer_credentials,
+            )
+
+            # probe first: some sandboxed environments deny the query
+            probe_a, probe_b = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+            try:
+                get_peer_credentials(probe_a)
+            except PeerCredentialsUnsupported:
+                raise unittest.SkipTest(
+                    "peer credentials are not supported on this platform"
+                )
+            except OSError as exc:
+                raise unittest.SkipTest(
+                    f"peer credential query is not permitted here: {exc}"
+                )
+            finally:
+                probe_a.close()
+                probe_b.close()
+
+            data = self._get_peer_credentials()
+            # the kernel reports the credentials of the peer of the
+            # connection, which is this very test process
+            self.assertEqual(data["waitress.unix_peer_uid"], os.getuid())
+            self.assertEqual(data["waitress.unix_peer_gid"], os.getgid())
+            if sys.platform.startswith("linux"):
+                self.assertEqual(data["waitress.unix_peer_pid"], os.getpid())
+
+        def test_credentials_cannot_be_forced_by_headers(self):
+            from waitress.peercred import (
+                PeerCredentialsUnsupported,
+                get_peer_credentials,
+            )
+
+            probe_a, probe_b = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+            try:
+                get_peer_credentials(probe_a)
+            except (PeerCredentialsUnsupported, OSError) as exc:
+                raise unittest.SkipTest(f"cannot query credentials here: {exc}")
+            finally:
+                probe_a.close()
+                probe_b.close()
+
+            data = self._get_peer_credentials(
+                extra_headers=(b"X-Peer-Uid: 0\r\n" b"X-Waitress-Unix-Peer-Uid: 0\r\n")
+            )
+            # the spoofing attempt shows up as a plain HTTP_ header only
+            self.assertEqual(data["http_x_peer_uid"], "0")
+            self.assertEqual(data["waitress.unix_peer_uid"], os.getuid())
+            self.assertEqual(data["waitress.unix_peer_gid"], os.getgid())
+
 
 def parse_headers(fp):
     """Parses only RFC2822 headers from a file pointer."""
