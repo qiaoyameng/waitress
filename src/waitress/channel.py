@@ -19,7 +19,7 @@ import traceback
 from waitress.buffers import OverflowableBuffer, ReadOnlyFileBasedBuffer
 from waitress.parser import HTTPRequestParser
 from waitress.task import ErrorTask, WSGITask
-from waitress.utilities import InternalServerError
+from waitress.utilities import InternalServerError, RequestHeaderTimeout
 
 from . import wasyncore
 
@@ -42,6 +42,11 @@ class HTTPChannel(wasyncore.dispatcher):
 
     # A request that has not been received yet completely is stored here
     request = None
+    # Time at which the first byte of the current request was received. This
+    # is used to enforce adj.header_timeout and is intentionally not reset
+    # when more data for the same request arrives.
+    request_header_start = None
+    header_timeout_exceeded = False  # set to True once the header timeout hit
     last_activity = 0  # Time of last activity
     will_close = False  # set to True to close the socket.
     close_when_flushed = False  # set to True to close the socket when flushed
@@ -204,12 +209,23 @@ class HTTPChannel(wasyncore.dispatcher):
             # flag, and we read data but our service thread is attempting to
             # shut down the connection due to an error. We want to make sure we
             # do this while holding the request_lock so that we can't race
-            if self.will_close or self.close_when_flushed:
+            # with it. The same applies once the request header timeout has
+            # been exceeded: any further data is discarded rather than parsed
+            # as a new request.
+            if (
+                self.will_close
+                or self.close_when_flushed
+                or self.header_timeout_exceeded
+            ):
                 return False
 
             while data:
                 if self.request is None:
                     self.request = self.parser_class(self.adj)
+                    # Start the header timeout timer for the new request at
+                    # the moment its first byte arrives, even if it shares a
+                    # packet with the tail of the previous request.
+                    self.request_header_start = time.time()
                 n = self.request.received(data)
 
                 # if there are requests queued, we can not send the continue
@@ -243,6 +259,57 @@ class HTTPChannel(wasyncore.dispatcher):
                 data = data[n:]
 
         return True
+
+    def check_header_timeout(self, now):
+        """
+        Enforce adj.header_timeout for a request whose headers are still
+        being received. Called from the server maintenance loop.
+        """
+        request = self.request
+
+        if (
+            request is None
+            or request.headers_finished
+            or self.request_header_start is None
+            or self.header_timeout_exceeded
+            or self.will_close
+            or self.close_when_flushed
+        ):
+            return
+
+        if self.request_header_start < now - self.adj.header_timeout:
+            self.handle_header_timeout()
+
+    def handle_header_timeout(self):
+        """
+        The client took too long to send the request headers. Discard the
+        partially received request, queue a single error response and close
+        the connection once it has been flushed. Any further data sent by
+        the client is discarded, not parsed as a new request.
+        """
+        with self.requests_lock:
+            if self.header_timeout_exceeded:
+                return
+            self.header_timeout_exceeded = True
+
+            # Discard the partially received request; its leftover bytes must
+            # not be parsed as a new request.
+            if self.request is not None:
+                self.request.close()
+                self.request = None
+
+            err_request = self.parser_class(self.adj)
+            err_request.parse_header(b"GET / HTTP/1.0\r\n")
+            err_request.error = RequestHeaderTimeout(
+                "exceeds header_timeout of %s" % self.adj.header_timeout
+            )
+            self.requests.append(err_request)
+
+            if len(self.requests) == 1:
+                # self.requests was empty before so the main thread is in
+                # charge of starting the task. Otherwise service() will add
+                # a new task after each request has been processed.
+                self.server.add_task(self)
 
     def _flush_some_if_lockable(self, do_close=True):
         # Since our task may be appending to the outbuf, we try to acquire

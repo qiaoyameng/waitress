@@ -290,6 +290,11 @@ class RequestEntityTooLarge(BadRequest):
     reason = "Request Entity Too Large"
 
 
+class RequestHeaderTimeout(Error):
+    code = 408
+    reason = "Request Timeout"
+
+
 class InternalServerError(Error):
     code = 500
     reason = "Internal Server Error"

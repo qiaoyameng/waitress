@@ -596,6 +596,110 @@ class TestHTTPChannel(unittest.TestCase):
         self.assertTrue(inst.sent_continue)
         self.assertFalse(preq.completed)
 
+    def test_received_starts_request_header_timer_once(self):
+        from unittest import mock
+
+        from waitress import channel as channel_module
+
+        inst, sock, map = self._makeOneWithMap()
+        clock = DummyClock()
+        with mock.patch.object(channel_module, "time", clock):
+            inst.received(b"GE")
+            self.assertEqual(inst.request_header_start, 1000)
+            # trickling in more bytes must not refresh the timer
+            clock.now = 1005
+            inst.received(b"T")
+            self.assertEqual(inst.request_header_start, 1000)
+
+    def test_received_request_header_timer_restarts_per_request(self):
+        from unittest import mock
+
+        from waitress import channel as channel_module
+
+        inst, sock, map = self._makeOneWithMap()
+        inst.server = DummyServer()
+        clock = DummyClock(step=1)
+        with mock.patch.object(channel_module, "time", clock):
+            # the next request starts in the same packet that completed the
+            # previous one; it must get its own timing point
+            inst.received(b"GET / HTTP/1.1\r\n\r\nGE")
+            self.assertEqual(inst.request_header_start, 1001)
+
+    def test_check_header_timeout_no_request_in_progress(self):
+        inst, sock, map = self._makeOneWithMap()
+        # keep-alive idle time between requests is governed by
+        # channel_timeout, not by the header timeout
+        inst.check_header_timeout(10**9)
+        self.assertFalse(inst.header_timeout_exceeded)
+        self.assertEqual(inst.requests, [])
+
+    def test_check_header_timeout_not_exceeded(self):
+        inst, sock, map = self._makeOneWithMap()
+        inst.request = inst.parser_class(inst.adj)
+        inst.request.received(b"GE")
+        inst.request_header_start = 1000
+        inst.check_header_timeout(1000 + inst.adj.header_timeout)
+        self.assertFalse(inst.header_timeout_exceeded)
+        self.assertEqual(inst.requests, [])
+
+    def test_check_header_timeout_headers_finished(self):
+        inst, sock, map = self._makeOneWithMap()
+        inst.request = inst.parser_class(inst.adj)
+        inst.request.received(b"POST / HTTP/1.1\r\nContent-Length: 10\r\n\r\n")
+        inst.request_header_start = 1000
+        # once the headers are complete the body is governed by the existing
+        # channel rules, so the header timeout no longer applies
+        inst.check_header_timeout(10**9)
+        self.assertFalse(inst.header_timeout_exceeded)
+        self.assertEqual(inst.requests, [])
+
+    def test_check_header_timeout_exceeded(self):
+        inst, sock, map = self._makeOneWithMap()
+        inst.server = DummyServer()
+        inst.request = inst.parser_class(inst.adj)
+        inst.request.received(b"GE")
+        inst.request_header_start = 1000
+        inst.check_header_timeout(1000 + inst.adj.header_timeout + 1)
+        self.assertTrue(inst.header_timeout_exceeded)
+        self.assertIsNone(inst.request)
+        self.assertEqual(len(inst.requests), 1)
+        self.assertEqual(inst.requests[0].error.code, 408)
+        self.assertEqual(inst.server.tasks, [inst])
+
+    def test_check_header_timeout_sends_error_only_once(self):
+        inst, sock, map = self._makeOneWithMap()
+        inst.server = DummyServer()
+        inst.request = inst.parser_class(inst.adj)
+        inst.request.received(b"GE")
+        inst.request_header_start = 1000
+        inst.check_header_timeout(10**9)
+        inst.check_header_timeout(10**9 + 1)
+        self.assertEqual(len(inst.requests), 1)
+        self.assertEqual(inst.server.tasks, [inst])
+
+    def test_received_after_header_timeout_discards_data(self):
+        inst, sock, map = self._makeOneWithMap()
+        inst.server = DummyServer()
+        inst.request = inst.parser_class(inst.adj)
+        inst.request.received(b"GE")
+        inst.request_header_start = 1000
+        inst.check_header_timeout(10**9)
+        # leftover bytes must not be parsed as a new request
+        self.assertFalse(inst.received(b"GET / HTTP/1.1\r\n\r\n"))
+        self.assertIsNone(inst.request)
+        self.assertEqual(len(inst.requests), 1)
+
+    def test_service_after_header_timeout(self):
+        inst, sock, map = self._makeOneWithMap()
+        inst.server = DummyServer()
+        inst.request = inst.parser_class(inst.adj)
+        inst.request.received(b"GE")
+        inst.request_header_start = 1000
+        inst.check_header_timeout(10**9)
+        inst.service()
+        self.assertIn(b"408 Request Timeout", sock.sent)
+        self.assertTrue(inst.close_when_flushed)
+
     def test_service_with_one_request(self):
         inst, sock, map = self._makeOneWithMap()
         request = DummyRequest()
@@ -1074,6 +1178,7 @@ class DummyAdjustments:
     cleanup_interval = 900
     url_scheme = "http"
     channel_timeout = 300
+    header_timeout = 300
     log_socket_errors = True
     recv_bytes = 8192
     send_bytes = 1
@@ -1169,3 +1274,16 @@ class DummyTaskClass:
         self.request.serviced = True
         if self.toraise:
             raise self.toraise
+
+
+class DummyClock:
+    """A controllable clock; each call to time() advances by step seconds."""
+
+    def __init__(self, now=1000, step=0):
+        self.now = now
+        self.step = step
+
+    def time(self):
+        now = self.now
+        self.now += self.step
+        return now

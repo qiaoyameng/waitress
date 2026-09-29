@@ -99,6 +99,14 @@ Backward Incompatibilities
 Features
 ~~~~~~~~
 
+- Add a new ``header_timeout`` adjustment that limits the total time a client
+  may take to send the request headers of a single request. The timer starts
+  when the first byte of a request arrives and is not reset by subsequent
+  data, so a client can no longer hold a connection open indefinitely by
+  trickling header bytes a few at a time. When the timeout is exceeded a
+  ``408 Request Timeout`` response is sent and the connection is closed.
+  Defaults to 120 seconds.
+
 - Added support for Python 3.13.
   See https://github.com/Pylons/waitress/pull/445.
 
