@@ -344,11 +344,15 @@ class BaseWSGIServer(wasyncore.dispatcher):
         Closes channels that have not had any activity in a while.
 
         The timeout is configured through adj.channel_timeout (seconds).
+
+        Also enforces the request header timeout on channels that are still
+        receiving a request's headers, see adj.header_timeout.
         """
         cutoff = now - self.adj.channel_timeout
         for channel in self.active_channels.values():
             if (not channel.requests) and channel.last_activity < cutoff:
                 channel.will_close = True
+            channel.check_header_timeout(now)
 
     def print_listen(self, format_str):  # pragma: no cover
         self.log_info(format_str.format(self.effective_host, self.effective_port))

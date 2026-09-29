@@ -138,6 +138,7 @@ class Adjustments:
         ("connection_limit", int),
         ("cleanup_interval", int),
         ("channel_timeout", int),
+        ("header_timeout", int),
         ("log_socket_errors", asbool),
         ("max_request_header_size", int),
         ("max_request_body_size", int),
@@ -252,6 +253,12 @@ class Adjustments:
 
     # Maximum seconds to leave an inactive connection open.
     channel_timeout = 120
+
+    # Maximum seconds to wait for the request headers to be fully received,
+    # counted from the first byte of the request. Unlike channel_timeout this
+    # is not refreshed by subsequent data, so a client cannot hold a
+    # connection open indefinitely by dribbling out its headers.
+    header_timeout = 120
 
     # Boolean: turn off to not log premature client disconnects.
     log_socket_errors = True

@@ -251,12 +251,37 @@ class TestWSGIServer(unittest.TestCase):
         class DummyChannel:
             requests = []
 
+            def check_header_timeout(self, now):
+                self.header_timeout_checked = now
+
         zombie = DummyChannel()
         zombie.last_activity = 0
         zombie.running_tasks = False
         inst.active_channels[100] = zombie
         inst.maintenance(10000)
         self.assertTrue(zombie.will_close)
+        self.assertEqual(zombie.header_timeout_checked, 10000)
+
+    def test_maintenance_header_timeout(self):
+        inst = self._makeOneWithMap()
+
+        class DummyChannel:
+            will_close = False
+
+            def __init__(self):
+                self.requests = []
+                self.last_activity = 10000
+
+            def check_header_timeout(self, now):
+                self.header_timeout_checked = now
+
+        channel = DummyChannel()
+        inst.active_channels[100] = channel
+        inst.maintenance(10000)
+        # the channel is active, so it is not closed, but the request header
+        # timeout is still enforced
+        self.assertFalse(channel.will_close)
+        self.assertEqual(channel.header_timeout_checked, 10000)
 
     def test_backward_compatibility(self):
         from waitress.adjustments import Adjustments

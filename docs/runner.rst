@@ -264,6 +264,13 @@ Tuning options:
     120. 'Inactive' is defined as 'has received no data from the client and has
     sent no data to the client'.
 
+``--header-timeout=INT``
+    Maximum number of seconds to wait for the request headers to be fully
+    received, counted from the first byte of the request.  Unlike
+    ``--channel-timeout`` this is not refreshed by subsequent data, so a
+    client cannot hold a connection open indefinitely by dribbling out its
+    headers.  Default is 120.
+
 ``--channel-request-lookahead=INT``
     Sets the amount of requests we can continue to read from the socket, while
     we are processing current requests. The default value won't allow any

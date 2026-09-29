@@ -270,6 +270,19 @@ channel_timeout
 
     Default: ``120``
 
+header_timeout
+    Maximum seconds to wait for the request headers to be fully received
+    (integer), counted from the first byte of the request. Unlike
+    ``channel_timeout`` this deadline is not refreshed when more data
+    arrives, so a client cannot hold a connection open indefinitely by
+    sending its headers a few bytes at a time. Once the headers have been
+    received, the request body and the connection are governed by
+    ``channel_timeout`` again. A request that exceeds this limit is
+    answered with a ``408 Request Timeout`` error and the connection is
+    closed.
+
+    Default: ``120``
+
 log_socket_errors
     Set to ``False`` to not log premature client disconnect tracebacks.
 

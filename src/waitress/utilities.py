@@ -280,6 +280,11 @@ class BadRequest(Error):
     reason = "Bad Request"
 
 
+class RequestTimeout(Error):
+    code = 408
+    reason = "Request Timeout"
+
+
 class RequestHeaderFieldsTooLarge(BadRequest):
     code = 431
     reason = "Request Header Fields Too Large"

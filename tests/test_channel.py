@@ -596,6 +596,142 @@ class TestHTTPChannel(unittest.TestCase):
         self.assertTrue(inst.sent_continue)
         self.assertFalse(preq.completed)
 
+    def test_received_starts_request_header_clock(self):
+        from unittest import mock
+
+        import waitress.channel
+
+        inst, sock, map = self._makeOneWithMap()
+
+        with mock.patch.object(waitress.channel, "time") as m_time:
+            m_time.time.return_value = 100.0
+            inst.received(b"GET / HTTP/1.1\r\n")
+            self.assertIsNotNone(inst.request)
+            self.assertEqual(inst.request_header_start, 100.0)
+
+            # dribbling out the headers does not refresh the clock
+            m_time.time.return_value = 150.0
+            inst.received(b"Host: example.com")
+            self.assertIsNotNone(inst.request)
+            self.assertEqual(inst.request_header_start, 100.0)
+
+    def test_received_request_header_clock_next_request_same_packet(self):
+        from unittest import mock
+
+        import waitress.channel
+
+        inst, sock, map = self._makeOneWithMap()
+
+        with mock.patch.object(waitress.channel, "time") as m_time:
+            m_time.time.return_value = 100.0
+            inst.received(b"GET / HTTP/1.1\r\n")
+
+            # the rest of the first request arrives in the same packet as
+            # the first bytes of the next (pipelined) request
+            m_time.time.return_value = 200.0
+            inst.received(b"Host: example.com\r\n\r\nGET")
+
+            self.assertEqual(len(inst.requests), 1)
+            self.assertIsNotNone(inst.request)
+            # the clock for the next request starts when its first byte
+            # arrived, not when the previous request started
+            self.assertEqual(inst.request_header_start, 200.0)
+
+    def test_check_header_timeout_no_request(self):
+        inst, sock, map = self._makeOneWithMap()
+        # does not raise, does nothing
+        inst.check_header_timeout(10000)
+        self.assertListEqual(inst.requests, [])
+
+    def test_check_header_timeout_not_expired(self):
+        inst, sock, map = self._makeOneWithMap()
+        preq = DummyParser()
+        preq.completed = False
+        inst.request = preq
+        inst.request_header_start = 100
+        inst.check_header_timeout(100 + inst.adj.header_timeout - 1)
+        self.assertIs(inst.request, preq)
+        self.assertIsNone(preq.error)
+        self.assertListEqual(inst.requests, [])
+
+    def test_check_header_timeout_headers_finished(self):
+        # once the headers are complete the body falls back to the regular
+        # channel timeout rules
+        inst, sock, map = self._makeOneWithMap()
+        preq = DummyParser()
+        preq.completed = False
+        preq.headers_finished = True
+        inst.request = preq
+        inst.request_header_start = 0
+        inst.check_header_timeout(10000)
+        self.assertIs(inst.request, preq)
+        self.assertIsNone(preq.error)
+        self.assertListEqual(inst.requests, [])
+
+    def test_check_header_timeout_will_close(self):
+        inst, sock, map = self._makeOneWithMap()
+        preq = DummyParser()
+        preq.completed = False
+        inst.request = preq
+        inst.request_header_start = 0
+        inst.will_close = True
+        inst.check_header_timeout(10000)
+        self.assertIs(inst.request, preq)
+        self.assertIsNone(preq.error)
+        self.assertListEqual(inst.requests, [])
+
+    def test_check_header_timeout_expired(self):
+        from waitress.utilities import RequestTimeout
+
+        inst, sock, map = self._makeOneWithMap()
+        preq = DummyParser()
+        preq.completed = False
+        inst.request = preq
+        inst.request_header_start = 100
+        inst.check_header_timeout(100 + inst.adj.header_timeout)
+        self.assertIsNone(inst.request)
+        self.assertEqual(len(inst.requests), 1)
+        self.assertIs(inst.requests[0], preq)
+        self.assertTrue(preq.completed)
+        self.assertIsInstance(preq.error, RequestTimeout)
+        self.assertEqual(inst.server.tasks, [inst])
+        # a second maintenance run does not queue another error
+        inst.check_header_timeout(100 + 2 * inst.adj.header_timeout)
+        self.assertEqual(len(inst.requests), 1)
+        self.assertEqual(len(inst.server.tasks), 1)
+
+    def test_header_timeout_sends_error_once_and_closes(self):
+        from unittest import mock
+
+        import waitress.channel
+
+        inst, sock, map = self._makeOneWithMap()
+
+        with mock.patch.object(waitress.channel, "time") as m_time:
+            m_time.time.return_value = 1000.0
+            inst.received(b"GET / HTTP/1.1\r\nHost: example.com\r\n")
+            self.assertIsNotNone(inst.request)
+
+            # the client keeps the connection alive by dribbling bytes, but
+            # the header clock is not refreshed
+            m_time.time.return_value = 1301.0
+            inst.received(b"X")
+            inst.check_header_timeout(1301.0)
+
+        self.assertIsNone(inst.request)
+        self.assertEqual(len(inst.requests), 1)
+        # no more data is accepted while the error response is pending
+        self.assertFalse(inst.readable())
+
+        inst.service()
+        self.assertTrue(inst.close_when_flushed)
+        self.assertIn(b"408 Request Timeout", sock.sent)
+
+        # leftover bytes are not parsed as a new request
+        self.assertFalse(inst.received(b"GET / HTTP/1.1\r\n\r\n"))
+        self.assertListEqual(inst.requests, [])
+        self.assertEqual(len(inst.server.tasks), 1)
+
     def test_service_with_one_request(self):
         inst, sock, map = self._makeOneWithMap()
         request = DummyRequest()
@@ -1074,6 +1210,7 @@ class DummyAdjustments:
     cleanup_interval = 900
     url_scheme = "http"
     channel_timeout = 300
+    header_timeout = 300
     log_socket_errors = True
     recv_bytes = 8192
     send_bytes = 1

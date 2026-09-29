@@ -34,10 +34,22 @@ Backward Incompatibilities
   sending it with any other method is rejected with a 400 (Bad Request).
   Anything that is not an absolute-form, an authority-form or the asterisk-form
   has to be an origin-form, which section 3.2.1 defines as an absolute-path,
-  and a request-target that does not begin with a ``/`` is now rejected the
-  same way rather than reaching the application as a ``PATH_INFO`` that PEP
-  3333 does not allow. A request-target beginning with ``//`` is still treated
-  as a path, as before.
+    and a request-target that does not begin with a ``/`` is now rejected the
+    same way rather than reaching the application as a ``PATH_INFO`` that PEP
+    3333 does not allow. A request-target beginning with ``//`` is still treated
+    as a path, as before.
+
+Features
+~~~~~~~~
+
+- Added a new ``header_timeout`` adjustment that limits the total time the
+  request headers of a single request may take to arrive, counted from the
+  first byte of the request. Unlike ``channel_timeout`` it is not refreshed
+  when more data arrives, so a client can no longer hold a connection open
+  indefinitely by sending its headers a few bytes at a time (slowloris).
+  A request that exceeds the limit is answered with a ``408 Request Timeout``
+  error and the connection is closed. The idle keep-alive time between
+  requests is still governed by ``channel_timeout``.
 
 Bugfix
 ~~~~~~
