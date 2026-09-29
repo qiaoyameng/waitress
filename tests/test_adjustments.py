@@ -76,6 +76,36 @@ class Test_as_socket_list(unittest.TestCase):
             sock.close()
 
 
+class Test_as_callable(unittest.TestCase):
+    def _callFUT(self, value):
+        from waitress.adjustments import as_callable
+
+        return as_callable(value)
+
+    def test_callable_passthrough(self):
+        def callback(request):
+            return None
+
+        self.assertIs(self._callFUT(callback), callback)
+
+    def test_dotted_name_resolved(self):
+        from waitress.adjustments import as_callable
+
+        result = self._callFUT("waitress.adjustments:as_callable")
+        self.assertIs(result, as_callable)
+
+    def test_unresolvable_name(self):
+        self.assertRaises(
+            ValueError, self._callFUT, "waitress.adjustments:no_such_thing"
+        )
+
+    def test_unimportable_module(self):
+        self.assertRaises(ValueError, self._callFUT, "no.such.module:func")
+
+    def test_non_callable_resolution(self):
+        self.assertRaises(ValueError, self._callFUT, "waitress.adjustments:HAS_IPV6")
+
+
 class TestAdjustments(unittest.TestCase):
     def _hasIPv6(self):  # pragma: nocover
         if not socket.has_ipv6:
@@ -384,6 +414,28 @@ class TestAdjustments(unittest.TestCase):
         inst = self._makeOne(ident="specific_header")
         self.assertEqual(inst.ident, "specific_header")
 
+    def test_admission_callback_default(self):
+        inst = self._makeOne()
+        self.assertIsNone(inst.admission_callback)
+
+    def test_admission_callback_callable(self):
+        def callback(request):
+            return None
+
+        inst = self._makeOne(admission_callback=callback)
+        self.assertIs(inst.admission_callback, callback)
+
+    def test_admission_callback_dotted_name(self):
+        from waitress.adjustments import as_callable
+
+        inst = self._makeOne(admission_callback="waitress.adjustments:as_callable")
+        self.assertIs(inst.admission_callback, as_callable)
+
+    def test_admission_callback_not_callable(self):
+        self.assertRaises(
+            ValueError, self._makeOne, admission_callback="not:a callable!"
+        )
+
 
 class TestCLI(unittest.TestCase):
     def parse(self, argv):
@@ -454,6 +506,17 @@ class TestCLI(unittest.TestCase):
                 "unix_socket_perms": "777",
             },
             opts,
+        )
+
+    def test_admission_callback_param(self):
+        opts = self.parse(
+            [
+                "--admission-callback=waitress.adjustments:as_callable",
+                "tests.fixtureapps.runner:app",
+            ]
+        )
+        self.assertDictContainsSubset(
+            {"admission_callback": "waitress.adjustments:as_callable"}, opts
         )
 
     def test_listen_params(self):

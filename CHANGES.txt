@@ -74,6 +74,20 @@ Bugfix
   https://github.com/Pylons/waitress/issues/466 and
   https://github.com/Pylons/waitress/pull/488
 
+Features
+~~~~~~~~
+
+- Added an optional ``admission_callback`` argument to ``waitress.serve``.
+  The callback is invoked once the request headers have been fully parsed,
+  but before the request body is received and before any ``100 Continue``
+  response is sent. It is handed a read-only view of the request method,
+  target and headers, and either lets the request proceed to the WSGI
+  application or rejects it with a final ``(status, headers, body)``
+  response. A rejected request never reaches the WSGI application, its body
+  is never read, any body bytes already sent and any pipelined requests on
+  the same connection are discarded, and the connection is closed once the
+  rejection response has been flushed.
+
 3.0.2 (2024-11-16)
 ------------------
 

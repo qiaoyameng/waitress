@@ -328,3 +328,42 @@ channel_request_lookahead
     Default: ``0``
 
     .. versionadded:: 2.0.0
+
+admission_callback
+    An optional callable that is invoked once the request headers have been
+    fully parsed, but before the request body is received and before any
+    ``100 Continue`` response is sent. It allows requests to be accepted or
+    rejected based on credentials, quotas, or any other information carried
+    by the request line and headers, without first having to receive the
+    request body.
+
+    The callable is passed a single argument, a
+    ``waitress.utilities.AdmissionRequest``, which exposes only the request
+    ``method``, the request ``target``, and a read-only mapping of the
+    request ``headers``. The callable must return either:
+
+    - ``None`` to let the request proceed to the WSGI application, or
+    - a ``(status, headers, body)`` triple (for example
+      ``("403 Forbidden", [("Content-Type", "text/plain")], b"denied")``)
+      to reject the request with that final response. ``body`` may be
+      ``bytes`` or a ``str``. ``Connection``, ``Content-Length`` and
+      ``Transfer-Encoding`` headers are managed by the server and are
+      stripped from the supplied headers.
+
+    A rejected request never reaches the WSGI application, no ``100
+    Continue`` is sent for it, and its body is never read. Any body bytes
+    the client already sent, and any requests pipelined after the rejected
+    one on the same connection, are discarded; the connection is closed
+    (``Connection: close``) once the rejection response has been flushed.
+
+    If the callable raises an exception, or returns something that is not
+    ``None`` or a valid triple, the request is rejected with a ``500
+    Internal Server Error`` and the exception is logged.
+
+    The value may also be a dotted Python name (``"my.module:my_callable"``)
+    which is resolved at startup, so that the callback can be configured
+    from the command line or a configuration file.
+
+    Default: ``None``
+
+    .. versionadded:: 4.0

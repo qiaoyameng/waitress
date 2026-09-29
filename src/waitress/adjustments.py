@@ -82,6 +82,27 @@ def str_iftruthy(s):
     return str(s) if s else None
 
 
+def as_callable(value):
+    """Cast an adjustment value to a callable.
+
+    Callables are passed through unchanged, strings are resolved as dotted
+    Python names (``"my.module:my_callable"``), so that the adjustment can
+    also be set from the command line or a configuration file.
+    """
+    if callable(value):
+        return value
+
+    try:
+        resolved = pkgutil.resolve_name(value)
+    except (ValueError, ImportError, AttributeError) as exc:
+        raise ValueError(f"Cannot import callable '{value}': {exc}")
+
+    if not callable(resolved):
+        raise ValueError(f"'{value}' does not resolve to a callable")
+
+    return resolved
+
+
 def as_socket_list(sockets):
     """Checks if the elements in the list are of type socket and
     removes them if not."""
@@ -150,6 +171,7 @@ class Adjustments:
         ("sockets", as_socket_list),
         ("channel_request_lookahead", int),
         ("server_name", str),
+        ("admission_callback", as_callable),
     )
 
     _param_map = dict(_params)
@@ -305,6 +327,17 @@ class Adjustments:
     # only ever used if the remote client sent a request without a Host header
     # (or when using the Proxy settings, without forwarding a Host header)
     server_name = "waitress.invalid"
+
+    # An optional callable that is invoked once the request headers have been
+    # fully parsed, but before the request body is received and before any
+    # "100 Continue" response is sent. It is passed an AdmissionRequest
+    # exposing only the request method, target and headers, and must return
+    # None to let the request proceed to the WSGI application, or a
+    # (status, headers, body) triple to reject the request with that final
+    # response. A rejected request never reaches the WSGI application, its
+    # body is never read, and the connection is closed once the rejection
+    # response has been flushed.
+    admission_callback = None
 
     def __init__(self, **kw):
         if "listen" in kw and ("host" in kw or "port" in kw):

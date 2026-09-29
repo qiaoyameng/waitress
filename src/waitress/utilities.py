@@ -298,3 +298,122 @@ class InternalServerError(Error):
 class ServerNotImplemented(Error):
     code = 501
     reason = "Not Implemented"
+
+
+class AdmissionRequest:
+    """A read-only view of a request, as seen by the admission callback.
+
+    An instance of this class is passed to the ``admission_callback`` (see
+    ``waitress.serve``) once the request headers have been fully parsed, but
+    before the request body is received. It deliberately exposes nothing but
+    the request method, the request target and the request headers, so that
+    the decision to accept or reject a request cannot depend on (or wait for)
+    the request body.
+
+    .. attribute:: method
+        The HTTP request method, e.g. ``"POST"``.
+
+    .. attribute:: target
+        The request-target exactly as it was sent by the client, e.g.
+        ``"/upload?token=1"``.
+
+    .. attribute:: headers
+        A read-only mapping of the request headers. Keys are uppercased and
+        dashes are replaced with underscores, e.g. ``"CONTENT_LENGTH"``.
+    """
+
+    __slots__ = ("method", "target", "headers")
+
+    def __init__(self, method, target, headers):
+        self.method = method
+        self.target = target
+        self.headers = headers
+
+
+class AdmissionRejection:
+    """A final response used to reject a request in the admission callback.
+
+    Wraps the ``(status, headers, body)`` triple returned by the
+    ``admission_callback`` so that it can be rendered like any other error
+    response. ``Connection``, ``Content-Length`` and ``Transfer-Encoding``
+    headers are stripped from the supplied headers: the server always adds
+    ``Connection: close`` and the correct ``Content-Length`` itself, because
+    the connection is closed once the rejection response has been flushed.
+    """
+
+    # Headers that the server manages itself when sending the final response.
+    _ignored_headers = frozenset(("connection", "content-length", "transfer-encoding"))
+
+    def __init__(self, status, headers, body):
+        self.status = status
+        self.headers = headers
+        self.body = body
+
+    @classmethod
+    def from_response(cls, response):
+        """Build a rejection from a ``(status, headers, body)`` triple.
+
+        Raises ValueError if the triple returned by the admission callback
+        is not usable as an HTTP response.
+        """
+        try:
+            status, headers, body = response
+        except (TypeError, ValueError):
+            raise ValueError(
+                "admission_callback must return None or a "
+                "(status, headers, body) triple"
+            )
+
+        if (
+            not isinstance(status, str)
+            or len(status) < 4
+            or not status[:3].isdigit()
+            or status[3] != " "
+        ):
+            raise ValueError(
+                "admission_callback response status must look like "
+                "'403 Forbidden'"
+            )
+
+        validated_headers = []
+
+        try:
+            header_list = list(headers)
+        except TypeError:
+            raise ValueError(
+                "admission_callback response headers must be an iterable of "
+                "(name, value) pairs"
+            )
+
+        for header in header_list:
+            try:
+                name, value = header
+            except (TypeError, ValueError):
+                raise ValueError(
+                    "admission_callback response headers must be "
+                    "(name, value) pairs"
+                )
+
+            if not isinstance(name, str) or not isinstance(value, str):
+                raise ValueError(
+                    "admission_callback response headers must be "
+                    "(name, value) pairs of strings"
+                )
+
+            if name.lower() in cls._ignored_headers:
+                continue
+
+            validated_headers.append((name, value))
+
+        if isinstance(body, str):
+            body = body.encode("utf-8")
+
+        if not isinstance(body, bytes):
+            raise ValueError(
+                "admission_callback response body must be bytes or a string"
+            )
+
+        return cls(status, validated_headers, body)
+
+    def to_response(self, ident=None):
+        return self.status, list(self.headers), self.body

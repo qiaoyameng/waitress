@@ -107,6 +107,97 @@ class TestBadRequest(unittest.TestCase):
         self.assertEqual(inst.body, 1)
 
 
+class TestAdmissionRequest(unittest.TestCase):
+    def _makeOne(self):
+        from waitress.utilities import AdmissionRequest
+
+        return AdmissionRequest(
+            method="POST",
+            target="/upload?token=1",
+            headers={"HOST": "example.com"},
+        )
+
+    def test_it(self):
+        inst = self._makeOne()
+        self.assertEqual(inst.method, "POST")
+        self.assertEqual(inst.target, "/upload?token=1")
+        self.assertEqual(inst.headers, {"HOST": "example.com"})
+
+
+class TestAdmissionRejection(unittest.TestCase):
+    def _from_response(self, response):
+        from waitress.utilities import AdmissionRejection
+
+        return AdmissionRejection.from_response(response)
+
+    def test_from_response(self):
+        inst = self._from_response(
+            ("403 Forbidden", [("Content-Type", "text/plain")], b"denied")
+        )
+        self.assertEqual(inst.status, "403 Forbidden")
+        self.assertEqual(inst.headers, [("Content-Type", "text/plain")])
+        self.assertEqual(inst.body, b"denied")
+
+    def test_from_response_str_body_encoded(self):
+        inst = self._from_response(("403 Forbidden", [], "denied"))
+        self.assertEqual(inst.body, b"denied")
+
+    def test_from_response_strips_server_managed_headers(self):
+        inst = self._from_response(
+            (
+                "403 Forbidden",
+                [
+                    ("Connection", "keep-alive"),
+                    ("Content-Length", "1000000"),
+                    ("Transfer-Encoding", "chunked"),
+                    ("X-Quota", "0"),
+                ],
+                b"denied",
+            )
+        )
+        self.assertEqual(inst.headers, [("X-Quota", "0")])
+
+    def test_from_response_not_a_triple(self):
+        self.assertRaises(ValueError, self._from_response, "403 Forbidden")
+        self.assertRaises(ValueError, self._from_response, ("403 Forbidden", []))
+
+    def test_from_response_bad_status(self):
+        self.assertRaises(ValueError, self._from_response, (403, [], b"denied"))
+        self.assertRaises(ValueError, self._from_response, ("junk", [], b"denied"))
+        self.assertRaises(
+            ValueError, self._from_response, ("403Forbidden", [], b"denied")
+        )
+
+    def test_from_response_bad_body(self):
+        self.assertRaises(
+            ValueError, self._from_response, ("403 Forbidden", [], object())
+        )
+
+    def test_from_response_bad_headers(self):
+        self.assertRaises(
+            ValueError, self._from_response, ("403 Forbidden", None, b"denied")
+        )
+        self.assertRaises(
+            ValueError,
+            self._from_response,
+            ("403 Forbidden", ["not-a-pair"], b"denied"),
+        )
+        self.assertRaises(
+            ValueError,
+            self._from_response,
+            ("403 Forbidden", [(b"X-Name", b"value")], b"denied"),
+        )
+
+    def test_to_response(self):
+        inst = self._from_response(
+            ("403 Forbidden", [("Content-Type", "text/plain")], b"denied")
+        )
+        status, headers, body = inst.to_response("waitress")
+        self.assertEqual(status, "403 Forbidden")
+        self.assertEqual(headers, [("Content-Type", "text/plain")])
+        self.assertEqual(body, b"denied")
+
+
 class Test_undquote(unittest.TestCase):
     def _callFUT(self, value):
         from waitress.utilities import undquote

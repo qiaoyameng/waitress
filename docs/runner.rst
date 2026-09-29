@@ -276,6 +276,17 @@ Tuning options:
 
     Default: ``0``
 
+``--admission-callback=CALLABLE``
+    A dotted Python name (``my.module:my_callable``) of a callable that is
+    invoked once the request headers have been fully parsed, but before the
+    request body is received and before any ``100 Continue`` response is
+    sent. The callable is handed the request method, target and headers, and
+    either lets the request proceed or rejects it with a final response.
+    See the ``admission_callback`` argument of ``waitress.serve`` for the
+    full contract.
+
+    Default: none
+
 ``--[no-]log-socket-errors``
     Toggle whether premature client disconnect tracebacks ought to be logged.
     On by default.

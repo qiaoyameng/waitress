@@ -15,11 +15,16 @@ import socket
 import threading
 import time
 import traceback
+from types import MappingProxyType
 
 from waitress.buffers import OverflowableBuffer, ReadOnlyFileBasedBuffer
 from waitress.parser import HTTPRequestParser
 from waitress.task import ErrorTask, WSGITask
-from waitress.utilities import InternalServerError
+from waitress.utilities import (
+    AdmissionRejection,
+    AdmissionRequest,
+    InternalServerError,
+)
 
 from . import wasyncore
 
@@ -46,6 +51,8 @@ class HTTPChannel(wasyncore.dispatcher):
     will_close = False  # set to True to close the socket.
     close_when_flushed = False  # set to True to close the socket when flushed
     sent_continue = False  # used as a latch after sending 100 continue
+    admission_checked = False  # set once the admission callback ran
+    admission_rejected = False  # set when the admission callback rejected
     total_outbufs_len = 0  # total bytes ready to send
     current_outbuf_count = 0  # total bytes written to current outbuf
 
@@ -142,13 +149,16 @@ class HTTPChannel(wasyncore.dispatcher):
         # 1. We're not already about to close the connection.
         # 2. We're not waiting to flush remaining data before closing the
         #    connection
-        # 3. There are not too many tasks already queued (if lookahead is enabled)
-        # 4. There's no data in the output buffer that needs to be sent
+        # 3. A request was not rejected by the admission callback, in which
+        #    case the connection is closed once the rejection has been sent
+        # 4. There are not too many tasks already queued (if lookahead is enabled)
+        # 5. There's no data in the output buffer that needs to be sent
         #    before we potentially create a new task.
 
         return not (
             self.will_close
             or self.close_when_flushed
+            or self.admission_rejected
             or len(self.requests) > self.adj.channel_request_lookahead
             or self.total_outbufs_len
         )
@@ -204,13 +214,27 @@ class HTTPChannel(wasyncore.dispatcher):
             # flag, and we read data but our service thread is attempting to
             # shut down the connection due to an error. We want to make sure we
             # do this while holding the request_lock so that we can't race
-            if self.will_close or self.close_when_flushed:
+            #
+            # The same applies once the admission callback rejected a request:
+            # anything else the client sends (the rest of the request body or
+            # pipelined requests) is discarded, and the connection is closed
+            # as soon as the rejection response has been flushed.
+            if self.will_close or self.close_when_flushed or self.admission_rejected:
                 return False
 
             while data:
                 if self.request is None:
                     self.request = self.parser_class(self.adj)
+                    self.admission_checked = False
+                    self.admission_rejected = False
                 n = self.request.received(data)
+
+                # Once the headers have been received in full, give the
+                # admission callback (if any) a chance to reject the request
+                # before we send a 100 Continue or receive any of the body
+                if not self.admission_checked and self.request.headers_finished:
+                    self.admission_checked = True
+                    self._check_request_admission()
 
                 # if there are requests queued, we can not send the continue
                 # header yet since the responses need to be kept in order
@@ -238,11 +262,69 @@ class HTTPChannel(wasyncore.dispatcher):
                             self.server.add_task(self)
                     self.request = None
 
+                    if self.admission_rejected:
+                        # The admission callback rejected this request. Drop
+                        # whatever else was received along with it (an early
+                        # request body or pipelined requests); it must not be
+                        # parsed as another request. The connection is closed
+                        # once the rejection response has been flushed.
+                        return True
+
                 if n >= len(data):
                     break
                 data = data[n:]
 
         return True
+
+    def _check_request_admission(self):
+        """Run the admission callback for the request in self.request.
+
+        This is called once the request headers have been fully parsed, but
+        before any "100 Continue" response is sent and before the request
+        body is received. The callback is handed a read-only view of the
+        request method, target and headers only. If it returns a response,
+        the request is failed with it and never reaches the WSGI application.
+        """
+        callback = self.adj.admission_callback
+        request = self.request
+
+        if callback is None or request.empty or request.error is not None:
+            return
+
+        admission_request = AdmissionRequest(
+            method=request.command,
+            target=request.request_uri,
+            headers=MappingProxyType(dict(request.headers)),
+        )
+
+        try:
+            response = callback(admission_request)
+        except Exception:
+            self.logger.exception("Exception raised by admission_callback")
+            request.error = InternalServerError(
+                "admission_callback raised an exception"
+            )
+        else:
+            if response is None:
+                # The request is allowed to proceed
+                return
+
+            try:
+                request.error = AdmissionRejection.from_response(response)
+            except ValueError:
+                self.logger.exception("admission_callback returned an invalid response")
+                request.error = InternalServerError(
+                    "admission_callback returned an invalid response"
+                )
+
+        # The request was rejected: it must not be passed to the WSGI
+        # application, no 100 Continue may be sent for it, and its body is
+        # never received. The connection is closed once the rejection
+        # response has been flushed, since any body or pipelined requests
+        # the client may still send cannot be told apart from a new request.
+        request.expect_continue = False
+        request.completed = True
+        self.admission_rejected = True
 
     def _flush_some_if_lockable(self, do_close=True):
         # Since our task may be appending to the outbuf, we try to acquire
